@@ -1,0 +1,331 @@
+import math
+import pathlib
+import pickle
+import random
+from array import array
+
+import MaTris.matris as tetris
+import pygame
+import numpy as np
+import cv2
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+from experience import Experience
+
+from collections import namedtuple, deque
+
+from MaTris.matris import GameOver
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device} | HIP: {getattr(torch.version, 'hip', None)}")
+# device = torch.device("cpu")
+
+
+class PolicyType:
+    def __call__(self, logits, step):
+        pass
+
+class BoltzmannPolicy(PolicyType):
+    def __init__(self, decay = 1, temperature=1.0):
+        self.temperature = temperature
+        self.decay = decay
+
+    def __call__(self, logits, step):
+        temp = self.temperature * math.pow(self.decay, step)
+        return torch.softmax((logits - logits.max()) / temp, dim=0)
+
+class GreedyPolicy(PolicyType):
+    def __call__(self, logits, step):
+        logits = logits.squeeze(0)
+        probs = torch.zeros_like(logits)
+        probs[torch.argmax(logits)] = 1
+        return probs
+
+class EpsilonGreedyPolicy(PolicyType):
+    def __init__(self, epsilon=0.1):
+        self.epsilon = epsilon
+
+    def __call__(self, logits, step):
+        logits = logits.squeeze(0)
+        action_e = self.epsilon / logits.shape[0]
+        probs = torch.ones_like(logits) * action_e
+        probs[torch.argmax(logits)] += action_e + (1 - self.epsilon)
+        return probs
+
+class RandomPolicy(PolicyType):
+    def __call__(self, logits, step):
+        logits = logits.squeeze(0)
+        zeros = torch.zeros_like(logits)
+        zeros[random.randrange(logits.shape[0])] = 1
+        return zeros
+
+class ERM:
+    def __init__(self, maxlen = 10000):
+        self.experts = {}
+        self.buffer = deque(maxlen=maxlen)
+        self.weights = np.ones(maxlen) / maxlen
+
+    def full(self):
+        return self.buffer.maxlen == len(self.buffer)
+
+    def append(self, experience):
+        self.buffer.append(experience)
+
+    def sample(self, batch_size):
+        idx = np.random.choice(len(self.buffer), size=batch_size, replace=False, p=self.weights)
+        return deque(self.buffer[i] for i in idx)
+
+    def sample_batch(self, batch_size):
+        return Experience(*zip(*self.sample(batch_size)))
+
+    def recalculate_sweep(self, gamma, network, epsilon = 0.01, n = 1):
+        with torch.no_grad():
+            network.eval()
+            buffer = list(self.buffer)
+            for i in range(0, len(self.buffer), 128):
+                end = min(i + 128, len(self.buffer))
+                experiences = Experience(*zip(*buffer[i:end]))
+
+                states = torch.tensor(np.array(experiences.state), dtype=torch.float32).to(device)
+                next_states = torch.tensor(np.array(experiences.next_state), dtype=torch.float32).to(device)
+                actions = torch.tensor(np.array(experiences.action), dtype=torch.int32).to(device).unsqueeze(1)
+                rewards = torch.tensor(np.array(experiences.reward), dtype=torch.float32).to(device)
+                dones = torch.tensor(np.array(experiences.done), dtype=torch.int32).to(device)
+
+                next_state_values = torch.max(network(next_states), dim=1).values.detach()
+
+                predicted_values = rewards + gamma * next_state_values * dones
+                state_values = network(states).gather(1, actions).squeeze(1)
+
+                td_error = torch.abs(predicted_values - state_values)
+                self.weights[i:end] = np.pow(td_error.cpu().numpy() + epsilon, n)
+        self.weights /= self.weights.sum()
+
+        network.train()
+
+    def load_expert_file(self, file):
+        with open(file, "rb") as f:
+            self.experts[file] = pickle.load(f)
+            print(f"Loaded expert file {file} with {len(self.experts[file])} experiences")
+
+    def load(self, file, amount = -1):
+        if self.experts.get(file) is None:
+            self.load_expert_file(file)
+        if amount == -1:
+            amount = len(self.experts[file])
+        data = random.sample(self.experts[file], amount)
+        self.buffer.extend(data)
+
+    def __len__(self):
+        return len(self.buffer)
+
+class DQNNetwork(torch.nn.Module):
+    def __init__(self, output_shape = 5, lr=0.001):
+        super().__init__()
+        p = 0.25
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            nn.Conv2d(32, 64, kernel_size=3),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+
+            nn.Conv2d(64, 128, kernel_size=(18, 1)),
+            nn.BatchNorm2d(128),
+            nn.ReLU()
+        )
+
+        self.fc = nn.Sequential(
+            nn.LazyLinear(128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(p),
+
+            nn.Linear(128, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(p),
+
+            nn.Linear(512, output_shape),
+        )
+
+        self.optimizer = torch.optim.RMSprop(self.parameters(), lr=lr, momentum=0.95)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = torch.flatten(x, start_dim=1)
+        x = self.fc(x)
+        return x
+
+    def save(self, file):
+        if file:
+            torch.save(self.state_dict(), file)
+
+    def load(self, file):
+        if file is not None and pathlib.Path(file).exists():
+            self.load_state_dict(torch.load(file, weights_only=True, map_location=device))
+
+class DQN:
+    def __init__(self, engine, policy: PolicyType = BoltzmannPolicy(), erm_size = 10000, lr=0.001, gamma = 0.95, uprate = 0.001, sweep_rate=100, load_file=None):
+        self.gamma = gamma
+        self.network = DQNNetwork(lr=lr).to(device)
+        self.target_network = DQNNetwork(lr=lr).to(device)
+        self.network.load(load_file)
+        self.target_network.load_state_dict(self.network.state_dict())
+        self.erm = ERM(erm_size)
+        self.engine = engine
+        self.uprate = uprate
+        self.sweep_rate = sweep_rate
+        self.policy = policy
+
+    def run_network(self, state, step):
+        logits = self.network(torch.tensor(state).unsqueeze(0).to(device))
+        probs = self.policy(logits, step)
+        dist = torch.distributions.Categorical(probs=probs)
+        action = dist.sample().item()
+        return action
+
+    def run_expert(self, engine, state, max_steps):
+        for i in range(max_steps):
+            actions = engine.best_action_set()
+            for action in actions:
+                next_state, reward, gameover = self.engine.step(action)
+                self.erm.append(Experience(state, action.value, reward, next_state, 0 if gameover else 1))
+
+                state = next_state
+
+                if gameover:
+                    state = self.engine.reset()
+
+    def fill_erm(self, engine):
+        state = self.engine.reset()
+        while not self.erm.full():
+            self.run_expert(engine, state, 1)
+
+    def train(self, max_steps, batches = 128, updates = 1, batch_size = 128, experiences = 128, save_file = None):
+        state = self.engine.reset()
+        episodes = 0
+        average_reward = 0
+        for step in range(max_steps):
+            print(f"Running step {step}")
+            with torch.no_grad():
+                self.network.eval()
+                total_reward = 0
+                for k in range(experiences):
+                    action = self.run_network(state, step)
+                    next_state, reward, gameover = self.engine.step(action)
+                    self.erm.append(Experience(state, action, reward, next_state, 0 if gameover else 1))
+                    total_reward += reward
+
+                    state = next_state
+
+                    if gameover:
+                        episodes += 1
+                        state = self.engine.reset()
+                self.network.train()
+                if random.random() < 0.01:
+                    self.run_expert(self.engine, state, experiences)
+
+                # self.erm.load("actions_poor.pkl", experiences // 2)
+
+            print(f"Total reward of experiences: {total_reward}")
+            average_reward += 1./max_steps * total_reward
+
+            if len(self.erm) < batch_size:
+                continue
+            for b in range(batches):
+                batch = self.erm.sample_batch(batch_size)
+
+                states = torch.tensor(np.array(batch.state), dtype=torch.float32).to(device)
+                next_states = torch.tensor(np.array(batch.next_state), dtype=torch.float32).to(device)
+                actions = torch.tensor(np.array(batch.action), dtype=torch.int32).to(device).unsqueeze(1)
+                rewards = torch.tensor(np.array(batch.reward), dtype=torch.float32).to(device).unsqueeze(1)
+                dones = torch.tensor(np.array(batch.done), dtype=torch.int32).to(device).unsqueeze(1)
+
+                for u in range(updates):
+                    with torch.no_grad():
+                        next_state_actions = torch.argmax(self.network(next_states), dim=1).unsqueeze(1)
+                        next_state_values = self.target_network(next_states).gather(1, next_state_actions).detach()
+                    predicted_values = rewards + self.gamma * next_state_values * dones
+                    state_values = self.network(states).gather(1, actions)
+
+                    self.network.optimizer.zero_grad()
+                    # criterion = nn.SmoothL1Loss()
+                    criterion = nn.MSELoss()
+                    loss = criterion(state_values, predicted_values)
+                    loss.backward()
+                    self.network.optimizer.step()
+
+            if self.uprate < 1:
+                # Polyak update
+                target_net_state_dict = self.target_network.state_dict()
+                policy_net_state_dict = self.network.state_dict()
+                for key in policy_net_state_dict:
+                    target_net_state_dict[key] = policy_net_state_dict[key]*self.uprate + target_net_state_dict[key]*(1-self.uprate)
+                self.target_network.load_state_dict(target_net_state_dict)
+            else:
+                # Replacement update
+                if step % int(self.uprate) == 0:
+                    self.target_network.load_state_dict(self.network.state_dict())
+
+            if step % 50 == 0:
+                self.network.save(save_file)
+            if step % self.sweep_rate == 0:
+                self.erm.recalculate_sweep(self.gamma, self.target_network)
+
+
+def main():
+    pygame.init()
+
+    screen = pygame.display.set_mode((tetris.WIDTH, tetris.HEIGHT))
+    pygame.display.set_caption("MaTris")
+    matris = tetris.Matris()
+    game = tetris.Game()
+    game.main(screen, matris)
+
+    deep_q = DQN(matris, policy=EpsilonGreedyPolicy(), load_file="silly.pth", erm_size=100000, gamma=0.85, lr=2e-4, uprate=5, sweep_rate=10)
+    # deep_q.erm.load("actions_poor.pkl")
+    deep_q.fill_erm(matris)
+    policy = GreedyPolicy()
+
+    rewards = []
+    eval = 0
+    try:
+        while True:
+            deep_q.train(1000, save_file = "silly.pth", experiences=1024, batch_size=128, batches=1000)
+
+            state = matris.reset()
+            deep_q.network.eval()
+            with torch.no_grad():
+                eval += 1
+                total_reward = 0
+                while True:
+                    logits = deep_q.network(torch.tensor(state).unsqueeze(0).to(device))
+                    probs = policy(logits, 0)
+                    dist = torch.distributions.Categorical(probs=probs)
+                    action = tetris.Action(dist.sample().item())
+                    print(f"{logits}, action taken: {action}")
+                    next_state, reward, gameover = matris.step(action)
+                    try:
+                        game.redraw()
+                    except:
+                        pass
+                    total_reward += reward
+                    state = next_state
+                    if gameover:
+                        break
+                rewards.append(total_reward)
+                surface = pygame.display.get_surface()
+                pygame.image.save(surface, f"screenshot-{eval}.png")
+                print(total_reward)
+            deep_q.network.train()
+    except KeyboardInterrupt:
+        print(rewards)
+
+if __name__ == "__main__":
+    main()
