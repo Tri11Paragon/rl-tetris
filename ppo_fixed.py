@@ -69,7 +69,7 @@ class EvaluatorNetwork(torch.nn.Module):
         if file is not None and pathlib.Path(file).exists():
             self.load_state_dict(torch.load(file, weights_only=True, map_location=device))
 
-def normalize_adv(x):
+def normalize(x):
     return (x - x.mean()) / (x.std() + 1e-8)
 
 class TrajectoryBuffer:
@@ -124,7 +124,7 @@ class TrajectoryBuffer:
             
             next_value = values[t]
             
-        return normalize_adv(gae), returns, tensors
+        return normalize(gae), returns, tensors
 
     def __len__(self):
         return len(self.buffer)
