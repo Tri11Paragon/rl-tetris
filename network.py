@@ -1,7 +1,11 @@
+from abc import abstractmethod
+
 from torch import nn
 import torch.nn.functional as F
 import torch
 import pathlib
+
+from typing import Protocol, Any, Generic, TypeVar, get_type_hints
 
 def make_conv2d(inc, outc, kernel_size):
     return nn.Sequential(
@@ -28,3 +32,34 @@ def make_linear(inp, out, p):
         nn.LayerNorm(out),
         nn.ReLU(),
         nn.Dropout(p))
+
+class NeuralNetwork(Protocol):
+    @abstractmethod
+    def step(self) -> None:
+        ...
+
+    @abstractmethod
+    def zero_grad(self) -> None:
+        ...
+
+    @abstractmethod
+    def act(self, state):
+        ...
+
+class PPONetwork(NeuralNetwork):
+    @abstractmethod
+    def step(self) -> None:
+        ...
+
+    @abstractmethod
+    def zero_grad(self) -> None:
+        ...
+
+    @abstractmethod
+    def act(self, state):
+        ...
+
+    @abstractmethod
+    def critic(self, state):
+        ...
+
