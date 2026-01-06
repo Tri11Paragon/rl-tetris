@@ -39,7 +39,7 @@ class NeuralNetwork(Protocol):
         ...
 
     @abstractmethod
-    def zero_grad(self) -> None:
+    def zero(self) -> None:
         ...
 
     @abstractmethod
@@ -52,7 +52,7 @@ class PPONetwork(NeuralNetwork):
         ...
 
     @abstractmethod
-    def zero_grad(self) -> None:
+    def zero(self) -> None:
         ...
 
     @abstractmethod
