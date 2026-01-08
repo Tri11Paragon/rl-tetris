@@ -43,7 +43,11 @@ class NeuralNetwork(Protocol):
         ...
 
     @abstractmethod
-    def act(self, state):
+    def compute(self, state):
+        ...
+
+    @abstractmethod
+    def act(self):
         ...
 
 class PPONetwork(NeuralNetwork):
@@ -56,10 +60,18 @@ class PPONetwork(NeuralNetwork):
         ...
 
     @abstractmethod
-    def act(self, state):
+    def compute(self, state):
         ...
 
     @abstractmethod
-    def critic(self, state):
+    def act(self):
+        ...
+
+    @abstractmethod
+    def critic(self):
+        ...
+
+    @abstractmethod
+    def extra_learn(self, state):
         ...
 

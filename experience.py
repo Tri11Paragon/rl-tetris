@@ -1,6 +1,7 @@
 from collections import namedtuple, defaultdict
 from typing import Protocol, Any, Generic, TypeVar, get_type_hints, overload
 import numpy as np
+import torch
 
 T = TypeVar("T")
 
@@ -23,8 +24,8 @@ class DQNExperienceLike(ExperienceLike):
 
 # Trajectory holds a set of related experiences as part of an episode
 class Trajectory(Generic[T]):
-    def __init__(self):
-        self.Keys = get_type_hints(T).keys()
+    def __init__(self, experience_cls: type[T]):
+        self.Keys = experience_cls._fields
         # Buffer of experiences
         self.buffer: dict[str, list] = {}
 
@@ -43,14 +44,16 @@ class Trajectory(Generic[T]):
             self.buffer[key].append(getattr(experience, key))
         self.last_value = last_value
 
+    def set_last_value(self, value):
+        self.last_value = value
+
     def clear(self):
         for _, value in self.buffer.items():
             value.clear()
 
     def compute_gae(self, gamma : float, lamda: float):
-        size = len(self.buffer)
-        gae = np.zeros(size)
-        returns = np.zeros(size)
+        size = len(self)
+        # print(size)
         advantage = 0
         next_value = self.last_value
 
@@ -58,8 +61,13 @@ class Trajectory(Generic[T]):
         rewards = self.buffer["reward"]
         values = self.buffer["state_value"]
 
+        device = values[0].device if len(values) > 0 else torch.device("cpu")
+
+        gae = torch.zeros(size, device=device)
+        returns = torch.zeros(size, device=device)
+
         # Iterate backwards to compute GAE and returns correctly
-        for t in reversed(range(N)):
+        for t in reversed(range(size)):
             # Masking terminal states: if dones[t] is True, the next state is 0-valued
             mask = 1.0 - dones[t]
 
@@ -77,6 +85,9 @@ class Trajectory(Generic[T]):
             next_value = values[t]
 
         return gae, returns
+
+    def to_tensors(self):
+        return {field: torch.cat(arr) for field, arr in self.buffer.items()}
 
     def __len__(self):
         return len(next(iter(self.buffer.values())))
@@ -100,6 +111,23 @@ class ERMBuffer(Generic[T]):
     def clear(self):
         for trajectory in self.buffer:
             trajectory.clear()
+
+    def to_tensors(self):
+        tensor_dict = defaultdict(list)
+        for trajectory in self.buffer:
+            for field, arr in trajectory.buffer.items():
+                tensor_dict[field].append(torch.cat(arr))
+        return {field: torch.cat(arr) for field, arr in tensor_dict.items()}
+
+    def compute_gae(self, gamma : float, lamda: float):
+        gaes = []
+        returns = []
+        for traj in self.buffer:
+            gae, ret = traj.compute_gae(gamma, lamda)
+            gaes.append(gae)
+            returns.append(ret)
+        return torch.cat(gaes), torch.cat(returns)
+
 
 @overload
 def sample(buffer: Trajectory[T], amount: int):
