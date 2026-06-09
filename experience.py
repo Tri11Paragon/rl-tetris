@@ -51,6 +51,15 @@ class Trajectory(Generic[T]):
         for _, value in self.buffer.items():
             value.clear()
 
+    def compute_returns(self, gamma: float) -> np.ndarray:
+        discounted_returns = np.zeros(len(self), dtype=np.float32)
+        rewards = self.buffer["reward"]
+
+        for i in reversed(range(len(self) - 1)):
+            discounted_returns[i] = discounted_returns[i + 1] * gamma + rewards[i]
+
+        return discounted_returns
+
     def compute_gae(self, gamma : float, lamda: float):
         size = len(self)
         # print(size)
@@ -112,6 +121,17 @@ class ERMBuffer(Generic[T]):
         for trajectory in self.buffer:
             trajectory.clear()
 
+    def compute_returns(self, gamma: float) -> tuple[np.ndarray, list[np.ndarray]]:
+        average_returns = np.zeros(len(self.buffer), dtype=np.float32)
+        returns = []
+
+        for i in range(len(self.buffer)):
+            rt = self.buffer[i].compute_returns(gamma)
+            average_returns[i] = rt.mean()
+            returns.append(rt)
+
+        return average_returns, returns
+
     def to_tensors(self):
         tensor_dict = defaultdict(list)
         for trajectory in self.buffer:
@@ -127,6 +147,9 @@ class ERMBuffer(Generic[T]):
             gaes.append(gae)
             returns.append(ret)
         return torch.cat(gaes), torch.cat(returns)
+
+    def __len__(self):
+        return len(self.buffer)
 
 
 @overload

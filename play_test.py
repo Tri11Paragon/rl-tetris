@@ -40,8 +40,10 @@ def main():
                     print(f"Game Over {total_reward} || Lines Cleared: {matris.lines} || Score: {matris.score}")
                     state = matris.reset()
                     total_reward = 0
-    except KeyboardInterrupt:
-        print(f"Average Reward {sum(rewards)/len(rewards)} || Average Lines Cleared: {sum(lines) / len(lines)} || Average Score: {sum(scores)/len(scores)}")
+    except:
+        pass
+    print(
+        f"Average Reward {sum(rewards) / len(rewards)} || Average Lines Cleared: {sum(lines) / len(lines)} || Num of episodes: {len(lines)}")
     
     
 main()

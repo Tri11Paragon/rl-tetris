@@ -7,33 +7,33 @@ import pathlib
 
 from typing import Protocol, Any, Generic, TypeVar, get_type_hints
 
-def make_conv2d(inc, outc, kernel_size):
+def make_conv2d(inc, outc, kernel_size, padding=0):
     return nn.Sequential(
-            nn.Conv2d(inc, outc, kernel_size=kernel_size),
+            nn.Conv2d(inc, outc, kernel_size=kernel_size, padding=padding),
             nn.GroupNorm(1, outc),
-            nn.ReLU())
+            nn.GELU())
 
 def make_conv1d(inc, outc, kernel_size):
     return nn.Sequential(
             nn.Conv1d(inc, outc, kernel_size=kernel_size),
             nn.GroupNorm(1, outc),
-            nn.ReLU())
+            nn.GELU())
 
 def make_lazy_linear(out, p):
     return nn.Sequential(
         nn.LazyLinear(out),
         nn.LayerNorm(out),
-        nn.ReLU(),
+        nn.GELU(),
         nn.Dropout(p))
 
 def make_linear(inp, out, p):
     return nn.Sequential(
         nn.Linear(inp, out),
         nn.LayerNorm(out),
-        nn.ReLU(),
+        nn.GELU(),
         nn.Dropout(p))
 
-class NeuralNetwork(Protocol):
+class ActorNetwork(Protocol):
     @abstractmethod
     def step(self) -> None:
         ...
@@ -50,7 +50,7 @@ class NeuralNetwork(Protocol):
     def act(self):
         ...
 
-class PPONetwork(NeuralNetwork):
+class ActorCriticNetwork(ActorNetwork):
     @abstractmethod
     def step(self) -> None:
         ...

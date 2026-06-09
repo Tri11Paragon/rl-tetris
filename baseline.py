@@ -1,3 +1,5 @@
+import argparse
+import itertools
 import math
 import pathlib
 import pickle
@@ -127,7 +129,7 @@ class DQNNetwork(torch.nn.Module):
         p = 0.25
 
         self.conv = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3),
+            nn.Conv2d(2, 32, kernel_size=3),
             nn.BatchNorm2d(32),
             nn.ReLU(),
 
@@ -190,26 +192,26 @@ class DQN:
         action = dist.sample().item()
         return action
 
-    def run_expert(self, engine, state, max_steps):
-        for i in range(max_steps):
-            actions = engine.best_action_set()
-            for action in actions:
-                next_state, reward, gameover = self.engine.step(action)
-                self.erm.append(Experience(state, action.value, reward, next_state, 0 if gameover else 1))
+    def run_expert(self, engine, state, max_steps = 1):
+        actions = engine.best_action_set()
+        for action in itertools.islice(actions, max_steps):
+            next_state, reward, gameover = self.engine.step(action)
+            self.erm.append(Experience(state, action.value, reward, next_state, 0 if gameover else 1))
 
-                state = next_state
+            state = next_state
 
-                if gameover:
-                    state = self.engine.reset()
+            if gameover:
+                state = self.engine.reset()
+
+        return state
 
     def fill_erm(self, engine):
         state = self.engine.reset()
         while not self.erm.full():
-            self.run_expert(engine, state, 1)
+            self.run_expert(engine, state, 1024)
 
     def train(self, max_steps, batches = 128, updates = 1, batch_size = 128, experiences = 128, save_file = None):
         state = self.engine.reset()
-        episodes = 0
         average_reward = 0
         for step in range(max_steps):
             print(f"Running step {step}")
@@ -217,21 +219,19 @@ class DQN:
                 self.network.eval()
                 total_reward = 0
                 for k in range(experiences):
-                    action = self.run_network(state, step)
-                    next_state, reward, gameover = self.engine.step(action)
-                    self.erm.append(Experience(state, action, reward, next_state, 0 if gameover else 1))
-                    total_reward += reward
+                    if random.random() < 0.01:
+                        state = self.run_expert(self.engine, state, 1)
+                    else:
+                        action = self.run_network(state, step)
+                        next_state, reward, gameover = self.engine.step(action)
+                        self.erm.append(Experience(state, action, reward, next_state, 0 if gameover else 1))
+                        total_reward += reward
 
-                    state = next_state
+                        state = next_state
 
-                    if gameover:
-                        episodes += 1
-                        state = self.engine.reset()
+                        if gameover:
+                            state = self.engine.reset()
                 self.network.train()
-                if random.random() < 0.01:
-                    self.run_expert(self.engine, state, experiences)
-
-                # self.erm.load("actions_poor.pkl", experiences // 2)
 
             print(f"Total reward of experiences: {total_reward}")
             average_reward += 1./max_steps * total_reward
@@ -278,26 +278,107 @@ class DQN:
             if step % self.sweep_rate == 0:
                 self.erm.recalculate_sweep(self.gamma, self.target_network)
 
-
-def main():
+def gui_test(args):
     pygame.init()
-
     screen = pygame.display.set_mode((tetris.WIDTH, tetris.HEIGHT))
     pygame.display.set_caption("MaTris")
     matris = tetris.Matris()
     game = tetris.Game()
     game.main(screen, matris)
 
-    deep_q = DQN(matris, policy=EpsilonGreedyPolicy(), load_file="silly.pth", erm_size=100000, gamma=0.85, lr=2e-4, uprate=5, sweep_rate=10)
-    # deep_q.erm.load("actions_poor.pkl")
+    engine = tetris.Matris()
+    state = engine.reset()
+    network = DQN(matris, policy=EpsilonGreedyPolicy(), load_file="dqn.pth", erm_size=100000, gamma=0.95, lr=2e-5, uprate=5, sweep_rate=25)
+    network.network.eval()
+    policy = GreedyPolicy()
+    run = False
+
+    episodes = []
+    probs = []
+    returns = []
+
+    try:
+        while True:
+            # game.clock.tick(120)
+            actions = game.get_user_actions()
+            if game.is_key(pygame.K_r):
+                run = not run
+
+            if game.is_key(pygame.K_v) or run:
+                logits = network.network(torch.tensor(state).unsqueeze(0).to(device))
+                l_probs = policy(logits, 0)
+                dist = torch.distributions.Categorical(probs=l_probs)
+                action = tetris.Action(dist.sample().item())
+                probs.append(dist.probs.squeeze())
+                actions.append(tetris.Action(action))
+
+            if len(actions) == 0:
+                game.redraw()
+                continue
+
+            for action in actions:
+                next_state, reward, game_over = matris.step(action)
+                returns.append(reward)
+                game.redraw()
+                state = next_state
+                if game_over:
+                    state = matris.reset()
+                    np_rewards = np.array(returns)
+
+                    discounted_rewards = np_rewards.copy()
+                    for i in reversed(range(len(returns) - 1)):
+                        discounted_rewards[i] = discounted_rewards[i + 1] * 0.95 + np_rewards[i]
+
+                    episodes.append( (torch.stack(probs), discounted_rewards, np_rewards) )
+                    probs.clear()
+                    returns.clear()
+                    raise SystemExit("Game Over")
+    except SystemExit or KeyboardInterrupt:
+        for i, episode in enumerate(episodes):
+
+            avg = episode[0].mean(dim=0)
+            std = episode[0].std(dim=0)
+            med = episode[0].median(dim=0).values
+            print(f"Item (Samples: {episode[0].shape} |:| Average: {avg.tolist()} | Std: {std.tolist()} | Med: {med.tolist()} |:|")
+            import graph
+            from matplotlib import pyplot as plt
+            plt.close(graph.plot_episode_action_probabilities_full(episode, i))
+            plt.close(graph.plot_episode_action_probabilities(episode, i))
+            plt.close(graph.plot_rewards_and_discounted_returns(episode, i, 0.95))
+
+        pygame.image.save(screen, f"episode.png")
+    except Exception as e:
+        raise e
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--gui_test", action="store_true")
+    parser.add_argument("--test", action="store_true")
+    args = parser.parse_args()
+
+    if args.gui_test:
+        gui_test(args)
+        return
+
+    # if args.test:
+    #     compute_measures(args)
+    #     return
+
+    pygame.init()
+
+    matris = tetris.Matris()
+
+    deep_q = DQN(matris, policy=EpsilonGreedyPolicy(), load_file="dqn.pth", erm_size=100000, gamma=0.95, lr=2e-5, uprate=5, sweep_rate=10)
     deep_q.fill_erm(matris)
     policy = GreedyPolicy()
 
     rewards = []
+    average_rewards = []
     eval = 0
     try:
         while True:
-            deep_q.train(1000, save_file = "silly.pth", experiences=1024, batch_size=128, batches=1000)
+            steps = 0
+            deep_q.train(1000, save_file = "dqn.pth", experiences=1024, batch_size=128, batches=1000)
 
             state = matris.reset()
             deep_q.network.eval()
@@ -305,26 +386,24 @@ def main():
                 eval += 1
                 total_reward = 0
                 while True:
+                    steps += 1
                     logits = deep_q.network(torch.tensor(state).unsqueeze(0).to(device))
                     probs = policy(logits, 0)
                     dist = torch.distributions.Categorical(probs=probs)
                     action = tetris.Action(dist.sample().item())
-                    print(f"{logits}, action taken: {action}")
                     next_state, reward, gameover = matris.step(action)
-                    try:
-                        game.redraw()
-                    except:
-                        pass
                     total_reward += reward
                     state = next_state
                     if gameover:
                         break
                 rewards.append(total_reward)
-                surface = pygame.display.get_surface()
-                pygame.image.save(surface, f"screenshot-{eval}.png")
+                average_rewards.append(total_reward / steps)
                 print(total_reward)
             deep_q.network.train()
     except KeyboardInterrupt:
+        import graph
+        from matplotlib import pyplot as plt
+        plt.close(graph.plot_rewards_and_discounted_returns((torch.empty(0), np.array(average_rewards), np.array(rewards)), -1, 0.95))
         print(rewards)
 
 if __name__ == "__main__":
