@@ -30,7 +30,8 @@ import network as net
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device} | HIP: {getattr(torch.version, 'hip', None) or getattr(torch.version, 'cuda', None)}")
 
-DEFAULT_LEARN_RATE = 2e-5
+DEFAULT_ACTOR_LEARN_RATE = 2e-5
+DEFAULT_CRITIC_LEARN_RATE = 1e-4
 DEFAULT_CONV_LEARN_RATE = 5e-5
 DROPOUT_CHANCE = 0.2
 DEFAULT_GAMMA = 0.99
@@ -53,7 +54,7 @@ def detach_data_for_ac(data_tuple):
 
 
 class PPONetwork(nn.Module, net.ActorCriticNetwork):
-    def __init__(self, learn_rate=DEFAULT_LEARN_RATE, actor_output=ACTOR_OUTPUT, critic_output=CRITIC_OUTPUT, p=DROPOUT_CHANCE, eval_now = False):
+    def __init__(self, learn_rate=DEFAULT_ACTOR_LEARN_RATE, actor_output=ACTOR_OUTPUT, critic_output=CRITIC_OUTPUT, p=DROPOUT_CHANCE, eval_now = False):
         super().__init__()
         self.cache = {}
         self.device = device
@@ -232,7 +233,7 @@ class PPONetwork(nn.Module, net.ActorCriticNetwork):
 
 # http://vision.stanford.edu/teaching/cs231n/reports/2016/pdfs/121_Report.pdf
 class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
-    def __init__(self, learn_rate=DEFAULT_LEARN_RATE, conv_learn_rate=DEFAULT_CONV_LEARN_RATE, actor_output=ACTOR_OUTPUT, critic_output=CRITIC_OUTPUT, p=DROPOUT_CHANCE):
+    def __init__(self, actor_output=ACTOR_OUTPUT, critic_output=CRITIC_OUTPUT, p=DROPOUT_CHANCE):
         super().__init__()
         self.cache = {}
         self.device = device
@@ -257,12 +258,20 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
             self.conv3_2
         )
 
-        self.ff_1 = net.make_lazy_linear(128, p)
-        self.ff_2 = net.make_linear(128, 512, p)
+        self.ff_actor_1 = net.make_lazy_linear(128, p)
+        self.ff_actor_2 = net.make_linear(128, 512, p)
 
-        self.feed_forward = nn.Sequential(
-            self.ff_1,
-            self.ff_2
+        self.ff_critic_1 = net.make_lazy_linear(128, p)
+        self.ff_critic_2 = net.make_linear(128, 512, p)
+
+        self.feed_forward_actor = nn.Sequential(
+            self.ff_actor_1,
+            self.ff_actor_2
+        )
+
+        self.feed_forward_critic = nn.Sequential(
+            self.ff_critic_1,
+            self.ff_critic_2
         )
 
         self.ff_actor = nn.Linear(512, actor_output)
@@ -277,10 +286,11 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
 
         self.optimizer = torch.optim.Adam(
             [
-                {"params": self.conv_filters.parameters(), "lr": conv_learn_rate},
-                {"params": self.feed_forward.parameters(), "lr": learn_rate},
-                {"params": self._actor.parameters(), "lr": learn_rate},
-                {"params": self._critic.parameters(), "lr": learn_rate},
+                {"params": self.conv_filters.parameters(), "lr": DEFAULT_CONV_LEARN_RATE},
+                {"params": self.feed_forward_actor.parameters(), "lr": DEFAULT_ACTOR_LEARN_RATE},
+                {"params": self.feed_forward_critic.parameters(), "lr": DEFAULT_CRITIC_LEARN_RATE},
+                {"params": self._actor.parameters(), "lr": DEFAULT_ACTOR_LEARN_RATE},
+                {"params": self._critic.parameters(), "lr": DEFAULT_CRITIC_LEARN_RATE},
             ]
         )
 
@@ -292,9 +302,10 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
         conv_out = self.conv_filters(x)
 
         flat = conv_out.flatten(start_dim=1)
-        feed_out = self.feed_forward(flat)
+        feed_out_actor = self.feed_forward_actor(flat)
+        feed_out_critic = self.feed_forward_critic(flat)
 
-        return feed_out
+        return feed_out_actor, feed_out_critic
 
     def forward(self, _):
         self.compute(_)
@@ -305,9 +316,9 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
 
     def compute(self, state):
         self.cache.clear()
-        internal_state_tuple = self.calculate_internal_state(state)
-        self.cache["act"] = self._actor(internal_state_tuple)
-        self.cache["critic"] = self._critic(internal_state_tuple)
+        state_actor, state_critic = self.calculate_internal_state(state)
+        self.cache["act"] = self._actor(state_actor)
+        self.cache["critic"] = self._critic(state_critic)
 
     def act(self):
         return self.cache["act"]
@@ -436,7 +447,7 @@ class PPOTrainer:
         loss = self.model.extra_learn(b_state)
 
         self.model.zero()
-        loss += (actor_loss + 0.5 * critic_loss).mean()
+        loss += (actor_loss + 0.01 * critic_loss * 0.5).mean()
         loss.backward()
         progress.set_postfix(loss=loss.item())
         self.model.step()
@@ -621,7 +632,7 @@ def main():
     parser.add_argument("--max_episode_length", type=int, default=10000)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--save_frequency", type=int, default=5)
-    parser.add_argument("--load_file", type=str, default="ppo5.pt")
+    parser.add_argument("--load_file", type=str, default="ppo6.pt")
     parser.add_argument("--gui_test", action="store_true")
     parser.add_argument("--gamma", type=float, default=DEFAULT_GAMMA)
     args = parser.parse_args()

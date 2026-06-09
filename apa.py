@@ -1,7 +1,7 @@
 # https://arxiv.org/pdf/2306.02231
 import pygame
 
-from ppo2 import PPOExperienceGenerator, AdjustedSandfordACNetwork, DEFAULT_GAMMA, DEFAULT_LEARN_RATE, device
+from ppo2 import PPOExperienceGenerator, AdjustedSandfordACNetwork, DEFAULT_GAMMA, DEFAULT_ACTOR_LEARN_RATE, device
 import network as net
 import torch
 import numpy as np
@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 global_steps = 0
 
 class APATrainer:
-    def __init__(self, model: net.ActorCriticNetwork, generator: PPOExperienceGenerator, gamma = DEFAULT_GAMMA, lamda = DEFAULT_LEARN_RATE, batch_size = 64, load_file=None):
+    def __init__(self, model: net.ActorCriticNetwork, generator: PPOExperienceGenerator, gamma = DEFAULT_GAMMA, lamda = DEFAULT_ACTOR_LEARN_RATE, batch_size = 64, load_file=None):
         self.model = model
         self.generator = generator
         self.lamda = lamda
