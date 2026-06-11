@@ -19,7 +19,6 @@ def plot_episode_action_probabilities_full(episode_tuple, episode_num):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f'episode_{episode_num}_action_probs_sg.png')
 
     return fig
 
@@ -58,7 +57,6 @@ def plot_episode_action_probabilities(episode_tuple, episode_num):
     axes[-1].set_xlabel('Timestep in Episode')
     fig.suptitle(f'Action Probabilities Over Time - Episode {episode_num}', fontsize=14, y=0.995)
     plt.tight_layout()
-    plt.savefig(f'episode_{episode_num}_action_probs.png', dpi=100, bbox_inches='tight')
 
     return fig
 
@@ -114,7 +112,5 @@ def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.nd
     fig.suptitle(f"Rewards and Discounted Returns - Episode {episode_num}" if episode_num is not None else "Rewards and Discounted Returns", y=0.995)
 
     plt.tight_layout()
-
-    plt.savefig(f'episode_{episode_num}_discounted_rewards.png', dpi=150, bbox_inches="tight")
 
     return fig

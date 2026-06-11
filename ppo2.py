@@ -1,3 +1,4 @@
+import json
 import math
 import pathlib
 import pickle
@@ -30,34 +31,17 @@ import network as net
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device} | HIP: {getattr(torch.version, 'hip', None) or getattr(torch.version, 'cuda', None)}")
 
-DEFAULT_ACTOR_LEARN_RATE = 2e-5
-DEFAULT_CRITIC_LEARN_RATE = 1e-4
-DEFAULT_CONV_LEARN_RATE = 5e-5
-DROPOUT_CHANCE = 0.2
-DEFAULT_GAMMA = 0.99
-DEFAULT_LAMBDA = 0.1
-SHUFFLE_EXPERIENCES = False
-
 ACTOR_OUTPUT = 5
 CRITIC_OUTPUT = 1
 
-def detach_data_for_ac(data_tuple):
-    ff_height_out, ff_bump_out, ff_holes_out, height, conv2d_bump2, conv2d_holes2, conv2d_ac2 = data_tuple
-    # ff_height_out = ff_height_out.detach()
-    # ff_bump_out = ff_bump_out.detach()
-    # ff_holes_out = ff_holes_out.detach()
-    height = height.detach()
-    conv2d_bump2 = conv2d_bump2.detach()
-    conv2d_holes2 = conv2d_holes2.detach()
-
-    return torch.cat([height, conv2d_bump2, conv2d_holes2, conv2d_ac2], dim=1)
-
 # http://vision.stanford.edu/teaching/cs231n/reports/2016/pdfs/121_Report.pdf
 class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
-    def __init__(self, actor_output=ACTOR_OUTPUT, critic_output=CRITIC_OUTPUT, p=DROPOUT_CHANCE):
+    def __init__(self, config, actor_output=ACTOR_OUTPUT, critic_output=CRITIC_OUTPUT):
         super().__init__()
         self.cache = {}
         self.device = device
+
+        p = config["DROPOUT"]
 
         self.conv3x3_1 = net.make_conv2d(2, 32, kernel_size=(3, 3), padding=1)
         self.conv3x3_2 = net.make_conv2d(32, 64, kernel_size=(3, 3), padding=1)
@@ -107,11 +91,11 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
 
         self.optimizer = torch.optim.Adam(
             [
-                {"params": self.conv_filters.parameters(), "lr": DEFAULT_CONV_LEARN_RATE},
-                {"params": self.feed_forward_actor.parameters(), "lr": DEFAULT_ACTOR_LEARN_RATE},
-                {"params": self.feed_forward_critic.parameters(), "lr": DEFAULT_CRITIC_LEARN_RATE},
-                {"params": self._actor.parameters(), "lr": DEFAULT_ACTOR_LEARN_RATE},
-                {"params": self._critic.parameters(), "lr": DEFAULT_CRITIC_LEARN_RATE},
+                {"params": self.conv_filters.parameters(), "lr": config["CONV_LEARN_RATE"]},
+                {"params": self.feed_forward_actor.parameters(), "lr": config["ACTOR_LEARN_RATE"]},
+                {"params": self.feed_forward_critic.parameters(), "lr": config["CRITIC_LEARN_RATE"]},
+                {"params": self._actor.parameters(), "lr": config["ACTOR_LEARN_RATE"]},
+                {"params": self._critic.parameters(), "lr": config["CRITIC_LEARN_RATE"]},
             ]
         )
 
@@ -163,37 +147,35 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
             self.load_state_dict(torch.load(file, weights_only=True, map_location=self.device))
 
 class PPOExperienceGenerator:
-    def __init__(self, engine: tetris.Matris, model: net.ActorCriticNetwork, runs=10, max_episode_length=10000):
+    def __init__(self, config, engine: tetris.Matris, model: net.ActorCriticNetwork):
         self.engine: tetris.Matris = engine
         self.model: net.ActorCriticNetwork = model
-        self.runs = runs
-        self.max_episode_length = max_episode_length
+        self.config = config
 
 
     def generate(self):
         buffer = ERMBuffer[PPOExperience]()
-        clearing_buffer = ERMBuffer[PPOExperience]()
         self.model.eval()
         runs_progress = tqdm(
-            range(self.runs),
+            range(self.config["MAX_EPISODES"]),
             desc="Runs",
             dynamic_ncols=True,
             leave=False,
             position=1
         )
         episode_progress = tqdm(
-            total=self.max_episode_length,
+            total=self.config["MAX_EPISODE_LENGTH"],
             desc="Experiences",
             dynamic_ncols=True,
             leave=False,
             position=2
         )
+        state = self.engine.reset()
+        trajectory = Trajectory(PPOExperience)
         for _ in runs_progress:
-            state = self.engine.reset()
-            trajectory = Trajectory(PPOExperience)
-            clearing_actions = Trajectory(PPOExperience)
             episode_progress.reset()
-            for i in range(self.max_episode_length):
+            i = 0
+            while True:
                 state_tensor = torch.Tensor(state).unsqueeze(0).to(self.model.device)
 
                 with torch.no_grad():
@@ -205,38 +187,37 @@ class PPOExperienceGenerator:
                 action = dist.sample()
                 logprob = dist.log_prob(action)
 
-                state, reward, game_over, lines_cleared = self.engine.step(tetris.Action(action.item()))
+                state, reward, lines_cleared, game_over, truncated = self.engine.step(tetris.Action(action.item()))
                 reward = torch.tensor([reward]).to(self.model.device)
-                go = torch.tensor([int(game_over)]).to(self.model.device)
+                done = torch.tensor([int(game_over or truncated)]).to(self.model.device)
 
-                experience = PPOExperience(state_tensor.detach(), action, reward, go, logprob, state_value)
-                if lines_cleared > 0:
-                    clearing_actions.append(experience)
+                experience = PPOExperience(state_tensor.detach(), action, reward, done, logprob, state_value)
                 trajectory.append(experience)
 
-                if game_over:
-                    break
                 episode_progress.update(1)
-            state_tensor = torch.Tensor(state).unsqueeze(0).to(self.model.device)
-            self.model.compute(state_tensor)
-            state_value = self.model.critic()
-            trajectory.set_last_value(state_value)
-            buffer.append(trajectory)
+                i += 1
+                if truncated or game_over or i >= self.config["MAX_EPISODE_LENGTH"]:
+                    trajectory.set_last_value(state_value)
+                    buffer.append(trajectory)
+                    trajectory = Trajectory(PPOExperience)
 
-        return buffer, clearing_buffer
+                    if game_over:
+                        state = self.engine.reset()
+                    break
+
+                # if truncated:
+                #     trajectory.set_last_value(state_value)
+                #     buffer.append(trajectory)
+                #     trajectory = Trajectory(PPOExperience)
+
+
+        return buffer
 
 class PPOTrainer:
-    def __init__(self, model: net.ActorCriticNetwork, generator: PPOExperienceGenerator, gamma=DEFAULT_GAMMA, gae_discount=DEFAULT_LAMBDA, entropy=0.01, clip_epsilon=0.2, batch_size=64, load_file=None):
+    def __init__(self, config, model: net.ActorCriticNetwork, generator: PPOExperienceGenerator):
         self.model = model
         self.generator = generator
-        self.gamma = gamma
-        self.gae_discount = gae_discount
-        self.entropy = entropy
-        self.clip_epsilon = clip_epsilon
-        self.batch_size = batch_size
-        self.load_file = load_file
-
-        self.model.load(load_file)
+        self.config = config
 
     def step(self, batch, progress):
         b_state, b_action, b_logprob, b_advantages, b_returns = batch
@@ -259,10 +240,10 @@ class PPOTrainer:
         # PPO Surrogate Objective
         importance_ratio = torch.exp(action_logprob - b_logprob)
         surrogate = importance_ratio * b_advantages
-        clipped_surrogate = torch.clamp(importance_ratio, 1 - self.clip_epsilon,
-                                        1 + self.clip_epsilon) * b_advantages
+        clipped_surrogate = torch.clamp(importance_ratio, 1 - self.config["CLIP_EPSILON"],
+                                        1 + self.config["CLIP_EPSILON"]) * b_advantages
 
-        actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.entropy * entropy)
+        actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.config["ENTROPY"] * entropy)
         critic_loss = F.mse_loss(state_values, b_returns)
 
         loss = self.model.extra_learn(b_state)
@@ -275,14 +256,16 @@ class PPOTrainer:
 
         return loss.item(), critic_loss.mean().item(), actor_loss.mean().item()
 
-    def train(self, epochs):
+    def train(self):
         t0 = time.process_time()
         with torch.no_grad():
-            buffer, clearing_buffer = self.generator.generate()
+            buffer = self.generator.generate()
             t1 = time.process_time()
 
             tensors = buffer.to_tensors()
-            advantages, returns = buffer.compute_gae(self.gamma, self.gae_discount)
+            advantages, returns = buffer.compute_gae(self.config["GAMMA"], self.config["LAMBDA"])
+
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             dataset = torch.utils.data.TensorDataset(
                 tensors["state"],
@@ -292,24 +275,10 @@ class PPOTrainer:
                 returns
             )
 
-            loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=SHUFFLE_EXPERIENCES)
-
-            if len(clearing_buffer) > 0:
-                clearing_tensors = clearing_buffer.to_tensors()
-                clear_advantages, clear_returns = clearing_buffer.compute_gae(self.gamma, self.gae_discount)
-
-                clearing_dataset = torch.utils.data.TensorDataset(
-                    clearing_tensors["state"],
-                    clearing_tensors["action"],
-                    clearing_tensors["logprob"],
-                    clear_advantages,
-                    clear_returns
-                )
-
-                clearing_loader = torch.utils.data.DataLoader(clearing_dataset, batch_size=self.batch_size, shuffle=True)
+            loader = torch.utils.data.DataLoader(dataset, batch_size=self.config["BATCH_SIZE"], shuffle=self.config["SHUFFLE_EXPERIENCES"])
 
         epochs_progress = tqdm(
-            range(epochs),
+            range(self.config["EPOCHS"]),
             desc="Epochs",
             dynamic_ncols=True,
             leave=False,
@@ -322,15 +291,6 @@ class PPOTrainer:
         total_actor_loss = 0
         total_batches = 0
         for _ in epochs_progress:
-            if len(clearing_buffer) > 0:
-                batch = next(iter(clearing_loader), None)
-                if batch:
-                    avg_loss, critic_loss, actor_loss= self.step(batch, epochs_progress)
-                    total_loss += avg_loss
-                    total_critic_loss += critic_loss
-                    total_actor_loss += actor_loss
-                    total_batches += 1
-
             for batch in loader:
                 avg_loss, critic_loss, actor_loss= self.step(batch, epochs_progress)
                 total_loss += avg_loss
@@ -339,16 +299,124 @@ class PPOTrainer:
                 total_batches += 1
 
         t2 = time.process_time()
-        clearing_average_returns, _ = clearing_buffer.compute_returns(self.gamma)
-        clearing_average_returns = clearing_average_returns.mean()
-        average_returns, _ = buffer.compute_returns(self.gamma)
+        average_returns, _ = buffer.compute_returns(self.config["GAMMA"])
         average_returns = average_returns.mean()
         time_taken = t2 - t0
         collection_time = t1 - t0
-        return (average_returns, clearing_average_returns, time_taken,
-                collection_time, total_loss / total_batches, total_critic_loss / total_batches, total_actor_loss / total_batches)
+        return (average_returns, time_taken, collection_time,
+                total_loss / total_batches, total_critic_loss / total_batches, total_actor_loss / total_batches)
 
+class NetworkRealtimeVisualizer:
+    def __init__(self, width=520, height=520):
+        from pygame._sdl2.video import Window, Renderer
 
+        self.width = width
+        self.height = height
+        self.window = Window("Network View", size=(width, height), position=(900, 100))
+        self.renderer = Renderer(self.window)
+        self.font = pygame.font.Font(None, 24)
+        self.small_font = pygame.font.Font(None, 18)
+
+    def clear(self, color=(12, 12, 18, 255)):
+        self.renderer.draw_color = color
+        self.renderer.clear()
+
+    def present(self):
+        self.renderer.present()
+
+    def fill_rect(self, rect, color):
+        self.renderer.draw_color = color
+        self.renderer.fill_rect(rect)
+
+    def draw_rect(self, rect, color):
+        self.renderer.draw_color = color
+        self.renderer.draw_rect(rect)
+
+    def draw_text(self, text, x, y, color=(240, 240, 240), small=False):
+        from pygame._sdl2.video import Texture
+
+        font = self.small_font if small else self.font
+        text_surface = font.render(text, True, color[:3])
+        texture = Texture.from_surface(self.renderer, text_surface)
+
+        target = pygame.Rect(x, y, text_surface.get_width(), text_surface.get_height())
+        texture.draw(dstrect=target)
+
+    def draw_grid_channel(self, channel, x0, y0, title, scale=14):
+        self.draw_text(title, x0, y0 - 24)
+
+        channel = np.asarray(channel)
+        for y in range(channel.shape[0]):
+            for x in range(channel.shape[1]):
+                value = float(channel[y, x])
+
+                if value <= 0:
+                    color = (25, 25, 30, 255)
+                elif value < 2:
+                    color = (90, 90, 150, 255)
+                else:
+                    color = (80, 210, 120, 255)
+
+                rect = pygame.Rect(x0 + x * scale, y0 + y * scale, scale - 1, scale - 1)
+                self.fill_rect(rect, color)
+
+    def draw_action_probs(self, probs, logits, critic_value, selected_action=None):
+        action_names = ["RIGHT", "LEFT", "DOWN", "ROTATE", "HARD_DROP"]
+
+        x0 = 230
+        y0 = 60
+        bar_width = 220
+        bar_height = 24
+        gap = 12
+
+        self.draw_text("Actor output", x0, 25)
+        self.draw_text(f"Critic: {critic_value:.4f}", x0, 330)
+
+        if selected_action is not None:
+            self.draw_text(f"Selected: {action_names[selected_action]}", x0, 360)
+
+        for i, prob in enumerate(probs):
+            y = y0 + i * (bar_height + gap)
+
+            bg_rect = pygame.Rect(x0, y, bar_width, bar_height)
+            prob_rect = pygame.Rect(x0, y, int(bar_width * float(prob)), bar_height)
+
+            self.fill_rect(bg_rect, (55, 55, 65, 255))
+            self.fill_rect(prob_rect, (80, 180, 255, 255))
+
+            if selected_action == i:
+                self.draw_rect(
+                    pygame.Rect(x0 - 4, y - 4, bar_width + 8, bar_height + 8),
+                    (255, 220, 80, 255)
+                )
+
+            self.draw_text(
+                f"{action_names[i]}: {float(prob):.3f}",
+                x0,
+                y + 3,
+                color=(255, 255, 255),
+                small=True
+            )
+
+            self.draw_text(
+                f"logit {float(logits[i]):+.3f}",
+                x0,
+                y + bar_height + 1,
+                color=(180, 180, 180),
+                small=True
+            )
+
+    def update(self, state, logits, probs, critic_value, selected_action=None):
+        self.clear()
+
+        state_np = np.asarray(state)
+
+        self.draw_grid_channel(state_np[0], 20, 55, "Board channel")
+        self.draw_grid_channel(state_np[1], 20, 365, "Piece channel", scale=6)
+
+        self.draw_action_probs(probs, logits, critic_value, selected_action)
+
+        self.present()
 
 def gui_test(args):
     pygame.init()
@@ -364,6 +432,7 @@ def gui_test(args):
     network.eval()
     run = False
     best = False
+    visualizer = NetworkRealtimeVisualizer()
 
     episodes = []
     probs = []
@@ -371,6 +440,25 @@ def gui_test(args):
 
     try:
         while True:
+            def update_models(action):
+                with torch.no_grad():
+                    network.compute(torch.Tensor(state).unsqueeze(0).to(network.device))
+
+                    logits = network.act()
+                    critic_value = network.critic().item()
+                    dist = torch.distributions.Categorical(logits=logits)
+
+                action_probs = dist.probs.squeeze().detach().cpu().numpy()
+                action_logits = logits.squeeze().detach().cpu().numpy()
+
+                visualizer.update(
+                    state,
+                    action_logits,
+                    action_probs,
+                    critic_value,
+                    selected_action=action.value
+                )
+
             # game.clock.tick(120)
             actions = game.get_user_actions()
             if game.is_key(pygame.K_r):
@@ -394,30 +482,19 @@ def gui_test(args):
 
             if len(actions) == 0:
                 game.redraw()
+                update_models(tetris.Action(0))
                 continue
 
             for action in actions:
-                network.compute(torch.Tensor(state).unsqueeze(0).to(network.device))
+                update_models(action)
+
                 print(f"Critic says state is: {network.critic().item()} | ", end='')
-                next_state, reward, game_over, lines_cleared = matris.step(action)
+                next_state, reward, lines_cleared, game_over, truncated = matris.step(action, decay=DECAY, episodic_truncate=EPISODIC_TRUNCATE)
                 print(f"Reward was: {reward}")
                 returns.append(reward)
                 game.redraw()
                 state = next_state
-                # time.sleep(0.1)
-                # print(f"Reward Metric: {matris.grid.brett_reward_metric()}")
-                # grid_state = tetris.Grid(MATRIX_HEIGHT, MATRIX_WIDTH).from_state(state)
-                # bump, agg, heights = grid_state.bumpy()
-                # holes = grid_state.holes()
 
-                # network.compute(torch.Tensor(state).unsqueeze(0).to(network.device))
-                # extras = network.cache["extra"]
-                # state_value = network.critic()
-                # print(f"Reward {reward} | Critic value: {state_value.item()}")
-
-                # print(f"State Height: {agg} | Predicted Height: {extras['height'].item()}")
-                # print(f"State Bumpy: {bump} | Predicted Bumpy: {extras['bump'].item()}")
-                # print(f"State Holes: {holes} | Predicted Holes: {extras['holes'].item()}")
                 if game_over:
                     state = matris.reset()
                     np_rewards = np.array(returns)
@@ -447,15 +524,6 @@ def gui_test(args):
         raise e
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--runs", type=int, default=10)
-    parser.add_argument("--teacher_runs", type=int, default=1)
-    parser.add_argument("--max_episode_length", type=int, default=10000)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--save_frequency", type=int, default=5)
-    parser.add_argument("--load_file", type=str, default="ppo6.pt")
-    parser.add_argument("--gui_test", action="store_true")
-    parser.add_argument("--gamma", type=float, default=DEFAULT_GAMMA)
     args = parser.parse_args()
 
     if args.gui_test:
@@ -479,9 +547,11 @@ def main():
     counter = 0
     average_rets = 0
     loss_over_time = []
+    actor_loss_over_time = []
+    critic_loss_over_time = []
     try:
         while True:
-            rets, clear_rets, t, collects, average_loss, critic_loss, actor_loss = trainer.train(args.epochs)
+            rets, t, collects, average_loss, critic_loss, actor_loss = trainer.train()
             amounts = 2
             mins, maxes = 1 - 1 / amounts, 1 / amounts
             average_rets = average_rets * mins + rets * maxes
@@ -490,8 +560,18 @@ def main():
             counter += 1
             if counter % args.save_frequency == 0:
                 trainer.model.save(args.load_file)
+                data = {
+                    "loss": loss_over_time,
+                    "actor_loss": actor_loss_over_time,
+                    "critic_loss": critic_loss_over_time,
+                }
+
+                with open(f"{args.load_file}.json", "w") as f:
+                    json.dump(data, f)
 
             loss_over_time.append(average_loss)
+            actor_loss_over_time.append(actor_loss)
+            critic_loss_over_time.append(critic_loss)
 
             progress.update(1)
             progress.set_postfix({
@@ -500,12 +580,19 @@ def main():
                 "Actor Loss": f"{float(actor_loss):.6f}",
                 "Critic Loss": f"{float(critic_loss):.6f}",
                 "Avg Return": f"{average_rets:.6f}",
-                "Clearing": f"{float(clear_rets):.6f}",
                 "Time": f"{t:.2f}s",
                 "Collection": f"{collects:.2f}s",
             })
     except KeyboardInterrupt:
         network.save(args.load_file)
+        data = {
+            "loss": loss_over_time,
+            "actor_loss": actor_loss_over_time,
+            "critic_loss": critic_loss_over_time,
+        }
+
+        with open(f"{args.load_file}.json", "w") as f:
+            json.dump(data, f)
 
     plt.plot(loss_over_time)
     plt.savefig("loss.png")
