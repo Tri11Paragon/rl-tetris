@@ -43,24 +43,45 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
 
         p = config["DROPOUT"]
 
-        self.conv3x3_1 = net.make_conv2d(2, 32, kernel_size=(3, 3), padding=1)
-        self.conv3x3_2 = net.make_conv2d(32, 64, kernel_size=(3, 3), padding=1)
-        self.conv3x3_3 = net.make_conv2d(64, 128, kernel_size=(3, 3), padding=1)
+        self.conv3x3_1_actor = net.make_conv2d(2, 32, kernel_size=(3, 3), padding=1)
+        self.conv3x3_2_actor = net.make_conv2d(32, 64, kernel_size=(3, 3), padding=1)
+        self.conv3x3_3_actor = net.make_conv2d(64, 128, kernel_size=(3, 3), padding=1)
 
-        self.conv_collapse = net.make_conv2d(128, 128, kernel_size=(22, 1), padding=1)
+        self.conv_collapse_actor = net.make_conv2d(128, 128, kernel_size=(22, 1), padding=1)
 
-        self.conv3_1 = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
-        self.conv1 = net.make_conv2d(128, 128, kernel_size=(1, 1), padding=1)
-        self.conv3_2 = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
+        self.conv3_1_actor = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
+        self.conv1_actor = net.make_conv2d(128, 128, kernel_size=(1, 1), padding=1)
+        self.conv3_2_actor = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
 
-        self.conv_filters = nn.Sequential(
-            self.conv3x3_1,
-            self.conv3x3_2,
-            self.conv3x3_3,
-            self.conv_collapse,
-            self.conv3_1,
-            self.conv1,
-            self.conv3_2
+        self.conv_filters_actor = nn.Sequential(
+            self.conv3x3_1_actor,
+            self.conv3x3_2_actor,
+            self.conv3x3_3_actor,
+            self.conv_collapse_actor,
+            self.conv3_1_actor,
+            self.conv1_actor,
+            self.conv3_2_actor
+        )
+
+
+        self.conv3x3_1_critic = net.make_conv2d(2, 32, kernel_size=(3, 3), padding=1)
+        self.conv3x3_2_critic = net.make_conv2d(32, 64, kernel_size=(3, 3), padding=1)
+        self.conv3x3_3_critic = net.make_conv2d(64, 128, kernel_size=(3, 3), padding=1)
+
+        self.conv_collapse_critic = net.make_conv2d(128, 128, kernel_size=(22, 1), padding=1)
+
+        self.conv3_1_critic = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
+        self.conv1_critic = net.make_conv2d(128, 128, kernel_size=(1, 1), padding=1)
+        self.conv3_2_critic = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
+
+        self.conv_filters_critic = nn.Sequential(
+            self.conv3x3_1_critic,
+            self.conv3x3_2_critic,
+            self.conv3x3_3_critic,
+            self.conv_collapse_critic,
+            self.conv3_1_critic,
+            self.conv1_critic,
+            self.conv3_2_critic
         )
 
         self.ff_actor_1 = net.make_lazy_linear(128, p)
@@ -91,7 +112,8 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
 
         self.optimizer = torch.optim.Adam(
             [
-                {"params": self.conv_filters.parameters(), "lr": config["CONV_LEARN_RATE"]},
+                {"params": self.conv_filters_actor.parameters(), "lr": config["CONV_LEARN_RATE"]},
+                {"params": self.conv_filters_critic.parameters(), "lr": config["CONV_LEARN_RATE"]},
                 {"params": self.feed_forward_actor.parameters(), "lr": config["ACTOR_LEARN_RATE"]},
                 {"params": self.feed_forward_critic.parameters(), "lr": config["CRITIC_LEARN_RATE"]},
                 {"params": self._actor.parameters(), "lr": config["ACTOR_LEARN_RATE"]},
@@ -99,16 +121,20 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
             ]
         )
 
+        self.to(self.device)
+
 
     def zero(self):
         self.optimizer.zero_grad()
 
     def calculate_internal_state(self, x):
-        conv_out = self.conv_filters(x)
+        conv_out_actor = self.conv_filters_actor(x)
+        conv_out_critic = self.conv_filters_critic(x)
 
-        flat = conv_out.flatten(start_dim=1)
-        feed_out_actor = self.feed_forward_actor(flat)
-        feed_out_critic = self.feed_forward_critic(flat)
+        flat_actor = conv_out_actor.flatten(start_dim=1)
+        flat_critic = conv_out_critic.flatten(start_dim=1)
+        feed_out_actor = self.feed_forward_actor(flat_actor)
+        feed_out_critic = self.feed_forward_critic(flat_critic)
 
         return feed_out_actor, feed_out_critic
 
@@ -145,6 +171,7 @@ class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
     def load(self, file):
         if file is not None and pathlib.Path(file).exists():
             self.load_state_dict(torch.load(file, weights_only=True, map_location=self.device))
+        return self
 
 class PPOExperienceGenerator:
     def __init__(self, config, engine: tetris.Matris, model: net.ActorCriticNetwork):
@@ -163,19 +190,17 @@ class PPOExperienceGenerator:
             leave=False,
             position=1
         )
-        episode_progress = tqdm(
-            total=self.config["MAX_EPISODE_LENGTH"],
-            desc="Experiences",
-            dynamic_ncols=True,
-            leave=False,
-            position=2
-        )
         state = self.engine.reset()
         trajectory = Trajectory(PPOExperience)
         for _ in runs_progress:
-            episode_progress.reset()
-            i = 0
-            while True:
+            episode_progress = tqdm(
+                range(self.config["MAX_EPISODE_LENGTH"]),
+                desc="Experiences",
+                dynamic_ncols=True,
+                leave=False,
+                position=2
+            )
+            for _ in episode_progress:
                 state_tensor = torch.Tensor(state).unsqueeze(0).to(self.model.device)
 
                 with torch.no_grad():
@@ -189,26 +214,27 @@ class PPOExperienceGenerator:
 
                 state, reward, lines_cleared, game_over, truncated = self.engine.step(tetris.Action(action.item()))
                 reward = torch.tensor([reward]).to(self.model.device)
-                done = torch.tensor([int(game_over or truncated)]).to(self.model.device)
+                done = torch.tensor([int(game_over or (truncated and self.config["MATRIS_TRUNCATE_HARD_BOUNARY"]))]).to(self.model.device)
 
                 experience = PPOExperience(state_tensor.detach(), action, reward, done, logprob, state_value)
                 trajectory.append(experience)
 
-                episode_progress.update(1)
-                i += 1
-                if truncated or game_over or i >= self.config["MAX_EPISODE_LENGTH"]:
-                    trajectory.set_last_value(state_value)
+                if game_over:
+                    trajectory.set_last_value(0) # Value is masked out anyway
                     buffer.append(trajectory)
                     trajectory = Trajectory(PPOExperience)
 
-                    if game_over:
-                        state = self.engine.reset()
+                    state = self.engine.reset()
                     break
 
-                # if truncated:
-                #     trajectory.set_last_value(state_value)
-                #     buffer.append(trajectory)
-                #     trajectory = Trajectory(PPOExperience)
+                if truncated:
+                    state_tensor = torch.Tensor(state).unsqueeze(0).to(self.model.device)
+                    self.model.compute(state_tensor)
+                    trajectory.set_last_value(self.model.critic()) # Value is masked out.
+                    buffer.append(trajectory)
+                    trajectory = Trajectory(PPOExperience)
+                    if self.config["BREAK_ON_TRUNCATE"]:
+                        break
 
 
         return buffer
@@ -244,17 +270,20 @@ class PPOTrainer:
                                         1 + self.config["CLIP_EPSILON"]) * b_advantages
 
         actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.config["ENTROPY"] * entropy)
+        actor_loss = actor_loss.mean()
         critic_loss = F.mse_loss(state_values, b_returns)
+        critic_loss = critic_loss.mean()
 
-        loss = self.model.extra_learn(b_state)
+
+        self.model.extra_learn(b_state)
 
         self.model.zero()
-        loss += (actor_loss + 0.01 * critic_loss * 0.5).mean()
-        loss.backward()
-        progress.set_postfix(loss=loss.item())
+        critic_loss.backward()
+        actor_loss.backward()
+        progress.set_postfix(actor_loss=actor_loss.mean().item(), critic_loss=critic_loss.mean().item())
         self.model.step()
 
-        return loss.item(), critic_loss.mean().item(), actor_loss.mean().item()
+        return critic_loss.mean().item(), actor_loss.mean().item()
 
     def train(self):
         t0 = time.process_time()
@@ -292,8 +321,7 @@ class PPOTrainer:
         total_batches = 0
         for _ in epochs_progress:
             for batch in loader:
-                avg_loss, critic_loss, actor_loss= self.step(batch, epochs_progress)
-                total_loss += avg_loss
+                critic_loss, actor_loss= self.step(batch, epochs_progress)
                 total_critic_loss += critic_loss
                 total_actor_loss += actor_loss
                 total_batches += 1
@@ -417,186 +445,3 @@ class NetworkRealtimeVisualizer:
         self.draw_action_probs(probs, logits, critic_value, selected_action)
 
         self.present()
-
-def gui_test(args):
-    pygame.init()
-    screen = pygame.display.set_mode((tetris.WIDTH, tetris.HEIGHT))
-    pygame.display.set_caption("MaTris")
-    matris = tetris.Matris()
-    state = matris.reset()
-    game = tetris.Game()
-    game.main(screen, matris)
-
-    network = AdjustedSandfordACNetwork().to(device)
-    network.load(args.load_file)
-    network.eval()
-    run = False
-    best = False
-    visualizer = NetworkRealtimeVisualizer()
-
-    episodes = []
-    probs = []
-    returns = []
-
-    try:
-        while True:
-            def update_models(action):
-                with torch.no_grad():
-                    network.compute(torch.Tensor(state).unsqueeze(0).to(network.device))
-
-                    logits = network.act()
-                    critic_value = network.critic().item()
-                    dist = torch.distributions.Categorical(logits=logits)
-
-                action_probs = dist.probs.squeeze().detach().cpu().numpy()
-                action_logits = logits.squeeze().detach().cpu().numpy()
-
-                visualizer.update(
-                    state,
-                    action_logits,
-                    action_probs,
-                    critic_value,
-                    selected_action=action.value
-                )
-
-            # game.clock.tick(120)
-            actions = game.get_user_actions()
-            if game.is_key(pygame.K_r):
-                run = not run
-
-            if game.is_key(pygame.K_b):
-                best = not best
-                run = False
-
-            if game.is_key(pygame.K_v) or run:
-                network.compute(torch.Tensor(state).unsqueeze(0).to(network.device))
-                logits = network.act()
-                dist = torch.distributions.Categorical(logits=logits)
-                action = dist.sample().item()
-                # print(f"Action taken: {action} with dist {dist.probs.tolist()}")
-                probs.append(dist.probs.squeeze())
-                actions.append(tetris.Action(action))
-
-            if best and not run:
-                actions.extend(matris.best_action_set())
-
-            if len(actions) == 0:
-                game.redraw()
-                update_models(tetris.Action(0))
-                continue
-
-            for action in actions:
-                update_models(action)
-
-                print(f"Critic says state is: {network.critic().item()} | ", end='')
-                next_state, reward, lines_cleared, game_over, truncated = matris.step(action, decay=DECAY, episodic_truncate=EPISODIC_TRUNCATE)
-                print(f"Reward was: {reward}")
-                returns.append(reward)
-                game.redraw()
-                state = next_state
-
-                if game_over:
-                    state = matris.reset()
-                    np_rewards = np.array(returns)
-
-                    discounted_rewards = np_rewards.copy()
-                    for i in reversed(range(len(returns) - 1)):
-                        discounted_rewards[i] = discounted_rewards[i + 1] * DEFAULT_GAMMA + np_rewards[i]
-
-                    if len(probs) > 0:
-                        episodes.append( (torch.stack(probs), discounted_rewards, np_rewards) )
-                        probs.clear()
-                    returns.clear()
-                    raise SystemExit("Game Over")
-    except SystemExit or KeyboardInterrupt:
-        for i, episode in enumerate(episodes):
-
-            avg = episode[0].mean(dim=0)
-            std = episode[0].std(dim=0)
-            med = episode[0].median(dim=0).values
-            print(f"Item (Samples: {episode[0].shape} |:| Average: {avg.tolist()} | Std: {std.tolist()} | Med: {med.tolist()} |:|")
-            plt.close(graph.plot_episode_action_probabilities_full(episode, i))
-            plt.close(graph.plot_episode_action_probabilities(episode, i))
-            plt.close(graph.plot_rewards_and_discounted_returns(episode, i, DEFAULT_GAMMA))
-
-        pygame.image.save(screen, f"episode.png")
-    except Exception as e:
-        raise e
-
-def main():
-    args = parser.parse_args()
-
-    if args.gui_test:
-        gui_test(args)
-        return
-
-    engine = tetris.Matris()
-    network = AdjustedSandfordACNetwork().to(device)
-    generator = PPOExperienceGenerator(engine, network, runs=args.runs, max_episode_length=args.max_episode_length)
-
-    trainer = PPOTrainer(network, generator, gamma=args.gamma, load_file=args.load_file)
-
-    progress = tqdm(
-        total=None,
-        desc="[PPO] Training",
-        unit=" round",
-        dynamic_ncols=True,
-        position=0
-    )
-
-    counter = 0
-    average_rets = 0
-    loss_over_time = []
-    actor_loss_over_time = []
-    critic_loss_over_time = []
-    try:
-        while True:
-            rets, t, collects, average_loss, critic_loss, actor_loss = trainer.train()
-            amounts = 2
-            mins, maxes = 1 - 1 / amounts, 1 / amounts
-            average_rets = average_rets * mins + rets * maxes
-
-
-            counter += 1
-            if counter % args.save_frequency == 0:
-                trainer.model.save(args.load_file)
-                data = {
-                    "loss": loss_over_time,
-                    "actor_loss": actor_loss_over_time,
-                    "critic_loss": critic_loss_over_time,
-                }
-
-                with open(f"{args.load_file}.json", "w") as f:
-                    json.dump(data, f)
-
-            loss_over_time.append(average_loss)
-            actor_loss_over_time.append(actor_loss)
-            critic_loss_over_time.append(critic_loss)
-
-            progress.update(1)
-            progress.set_postfix({
-                "Return": f"{float(rets):.6f}",
-                "Avg Loss": f"{float(average_loss):.6f}",
-                "Actor Loss": f"{float(actor_loss):.6f}",
-                "Critic Loss": f"{float(critic_loss):.6f}",
-                "Avg Return": f"{average_rets:.6f}",
-                "Time": f"{t:.2f}s",
-                "Collection": f"{collects:.2f}s",
-            })
-    except KeyboardInterrupt:
-        network.save(args.load_file)
-        data = {
-            "loss": loss_over_time,
-            "actor_loss": actor_loss_over_time,
-            "critic_loss": critic_loss_over_time,
-        }
-
-        with open(f"{args.load_file}.json", "w") as f:
-            json.dump(data, f)
-
-    plt.plot(loss_over_time)
-    plt.savefig("loss.png")
-    plt.show()
-
-if __name__ == "__main__":
-    main()

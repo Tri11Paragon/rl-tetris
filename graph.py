@@ -30,6 +30,7 @@ def plot_episode_action_probabilities(episode_tuple, episode_num):
     # action_names = ['NONE', 'RIGHT', 'LEFT', 'DOWN', 'ROTATE', 'HARD_DROP']
     action_names = ['RIGHT', 'LEFT', 'DOWN', 'ROTATE', 'HARD_DROP']
     timesteps = np.arange(episode_tensor.shape[0])
+    timesteps_dr = np.arange(discounted_rewards.shape[0])
 
     fig, axes = plt.subplots(episode_tensor.shape[1], 1, figsize=(12, 10), sharex=True)
 
@@ -45,7 +46,7 @@ def plot_episode_action_probabilities(episode_tuple, episode_num):
 
         ax_r = ax.twinx()
 
-        ax_r.plot(timesteps, discounted_rewards, color='black', alpha=0.5, linewidth=2, label='Discounted Return', zorder=5)
+        ax_r.plot(timesteps_dr, discounted_rewards, color='black', alpha=0.5, linewidth=2, label='Discounted Return', zorder=5)
 
         ax_r.set_ylabel('Reward')
         ax_r.grid(False)
@@ -111,6 +112,57 @@ def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.nd
 
     fig.suptitle(f"Rewards and Discounted Returns - Episode {episode_num}" if episode_num is not None else "Rewards and Discounted Returns", y=0.995)
 
+    plt.tight_layout()
+
+    return fig
+
+def plot_gae_and_returns(gae: torch.Tensor, returns: torch.Tensor, episode_num=None, gamma=None, lamda=None):
+    gae = gae.detach().cpu().numpy()
+    returns = returns.detach().cpu().numpy()
+
+    if gae.ndim != 1 or returns.ndim != 1:
+        raise ValueError(
+            f"Expected 1D inputs. Got gae shape={gae.shape}, returns shape={returns.shape}"
+        )
+
+    T = min(len(gae), len(returns))
+    if T == 0:
+        raise ValueError("Inputs are empty after conversion.")
+
+    gae = gae[:T]
+    returns = returns[:T]
+    timesteps = np.arange(T)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+
+    ax1.plot(timesteps, gae, color="blue", linewidth=2, label="GAE")
+    ax1.fill_between(timesteps, gae, alpha=0.25, color="blue")
+    ax1.set_ylabel("GAE")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper right")
+    ax1.set_title("GAE")
+
+    ax2.plot(timesteps, returns, color="black", alpha=0.75, linewidth=2, label="Returns")
+    ax2.fill_between(timesteps, returns, alpha=0.20, color="black")
+    ax2.set_xlabel("Timestep")
+    ax2.set_ylabel("Returns")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper right")
+    ax2.set_title("Returns")
+
+    title = "GAE and Returns"
+    if episode_num is not None:
+        title += f" - Episode {episode_num}"
+
+    details = []
+    if gamma is not None:
+        details.append(f"gamma={gamma}")
+    if lamda is not None:
+        details.append(f"lambda={lamda}")
+    if details:
+        title += f" ({', '.join(details)})"
+
+    fig.suptitle(title, y=0.995)
     plt.tight_layout()
 
     return fig

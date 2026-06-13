@@ -1,7 +1,10 @@
+import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 import json
 import pickle
+from pathlib import Path
+
 
 def rolling_average(values, window):
     values = np.asarray(values, dtype=float)
@@ -15,9 +18,14 @@ def rolling_average(values, window):
     return x, averaged
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--location", '-l', type=str, default="experiments")
+    parser.add_argument("file")
+    args = parser.parse_args()
+
     rolling_window = 10
 
-    with open("ppo_new.pt.json", "r") as f:
+    with open(str(Path(args.location) / args.file / "state.json"), "r") as f:
         data = json.load(f)
     loss = data["loss"]
     actor_loss = data["actor_loss"]
@@ -56,13 +64,19 @@ def main():
             linewidth=2,
         )
 
+        ax.axhline(
+            0,
+            color="black",
+            linestyle="--",
+            linewidth=1,
+            alpha=0.7,
+        )
+
         if len(averaged) > 1:
-            derivative = np.gradient(averaged, x)
+            derivative = np.gradient(values)
             x2, deravg = rolling_average(derivative, rolling_window)
-            x2 = x2 + rolling_window
 
             derivative_ax.plot(
-                x,
                 derivative,
                 label=f"d/dstep rolling avg {label}",
                 color="tab:gray",
@@ -87,12 +101,10 @@ def main():
             )
 
             if len(deravg) > 1:
-                second_derivative = np.gradient(deravg, x2)
+                second_derivative = np.gradient(derivative)
                 x3, second_deravg = rolling_average(second_derivative, rolling_window)
-                x3 = x3 + rolling_window * 2
 
                 second_derivative_ax.plot(
-                    x2,
                     second_derivative,
                     label=f"d²/dstep² smoothed {label}",
                     color="tab:gray",

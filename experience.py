@@ -95,6 +95,9 @@ class Trajectory(Generic[T]):
 
         return gae, returns
 
+    def get_terminals(self):
+        return [i for i, v in enumerate(self.buffer["done"]) if v]
+
     def to_tensors(self):
         return {field: torch.cat(arr) for field, arr in self.buffer.items()}
 
