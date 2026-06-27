@@ -27,15 +27,18 @@ def main():
 
     with open(str(Path(args.location) / args.file / "state.json"), "r") as f:
         data = json.load(f)
-    loss = data["loss"]
     actor_loss = data["actor_loss"]
     critic_loss = data["critic_loss"]
 
-    loss_profiles = [
-        ("loss", loss),
-        ("actor_loss", actor_loss),
-        ("critic_loss", critic_loss),
-    ]
+    loss_profiles = []
+    if "actor_loss" in data and len(data["actor_loss"]) > 0:
+        loss_profiles.append(("actor_loss", actor_loss))
+    if "critic_loss" in data and len(data["critic_loss"]) > 0:
+        loss_profiles.append(("critic_loss", critic_loss))
+    if "loss" in data and len(data["loss"]) > 0:
+        loss_profiles.append(("loss", data["loss"]))
+    if "returns" in data and len(data["returns"]) > 0:
+        loss_profiles.append(("returns", data["returns"]))
 
     averaged_loss_profiles = [
         (name, value, rolling_average(value, rolling_window)) for name, value in loss_profiles

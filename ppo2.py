@@ -7,6 +7,7 @@ from array import array
 
 from matplotlib import pyplot as plt
 from tqdm.auto import tqdm
+from typing import Any
 
 import MaTris.matris as tetris
 import pygame
@@ -28,311 +29,79 @@ from MaTris.matris import GameOver
 
 import network as net
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device} | HIP: {getattr(torch.version, 'hip', None) or getattr(torch.version, 'cuda', None)}")
-
 ACTOR_OUTPUT = 5
 CRITIC_OUTPUT = 1
 
+
 # http://vision.stanford.edu/teaching/cs231n/reports/2016/pdfs/121_Report.pdf
-class AdjustedSandfordACNetwork(nn.Module, net.ActorCriticNetwork):
-    def __init__(self, config, actor_output=ACTOR_OUTPUT, critic_output=CRITIC_OUTPUT):
-        super().__init__()
-        self.cache = {}
-        self.device = device
+def AdjustedSandfordNetwork(config, device = None):
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device} | HIP: {getattr(torch.version, 'hip', None) or getattr(torch.version, 'cuda', None)}")
 
-        p = config["DROPOUT"]
+    p = config["DROPOUT"]
+    return net.Network(
+        {
+            "conv_filters": net.Lr(nn.Sequential(
+                net.make_conv2d(2, 32, kernel_size=(3, 3), padding=1),
+                net.make_conv2d(32, 32, kernel_size=(3, 3), padding=1),
+                net.make_conv2d(32, 64, kernel_size=(3, 3), padding=1),
 
-        self.conv3x3_1_actor = net.make_conv2d(2, 32, kernel_size=(3, 3), padding=1)
-        self.conv3x3_2_actor = net.make_conv2d(32, 64, kernel_size=(3, 3), padding=1)
-        self.conv3x3_3_actor = net.make_conv2d(64, 128, kernel_size=(3, 3), padding=1)
+                net.make_conv2d(64, 64, kernel_size=(22, 1), padding=1),
 
-        self.conv_collapse_actor = net.make_conv2d(128, 128, kernel_size=(22, 1), padding=1)
-
-        self.conv3_1_actor = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
-        self.conv1_actor = net.make_conv2d(128, 128, kernel_size=(1, 1), padding=1)
-        self.conv3_2_actor = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
-
-        self.conv_filters_actor = nn.Sequential(
-            self.conv3x3_1_actor,
-            self.conv3x3_2_actor,
-            self.conv3x3_3_actor,
-            self.conv_collapse_actor,
-            self.conv3_1_actor,
-            self.conv1_actor,
-            self.conv3_2_actor
-        )
-
-
-        self.conv3x3_1_critic = net.make_conv2d(2, 32, kernel_size=(3, 3), padding=1)
-        self.conv3x3_2_critic = net.make_conv2d(32, 64, kernel_size=(3, 3), padding=1)
-        self.conv3x3_3_critic = net.make_conv2d(64, 128, kernel_size=(3, 3), padding=1)
-
-        self.conv_collapse_critic = net.make_conv2d(128, 128, kernel_size=(22, 1), padding=1)
-
-        self.conv3_1_critic = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
-        self.conv1_critic = net.make_conv2d(128, 128, kernel_size=(1, 1), padding=1)
-        self.conv3_2_critic = net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1)
-
-        self.conv_filters_critic = nn.Sequential(
-            self.conv3x3_1_critic,
-            self.conv3x3_2_critic,
-            self.conv3x3_3_critic,
-            self.conv_collapse_critic,
-            self.conv3_1_critic,
-            self.conv1_critic,
-            self.conv3_2_critic
-        )
-
-        self.ff_actor_1 = net.make_lazy_linear(128, p)
-        self.ff_actor_2 = net.make_linear(128, 512, p)
-
-        self.ff_critic_1 = net.make_lazy_linear(128, p)
-        self.ff_critic_2 = net.make_linear(128, 512, p)
-
-        self.feed_forward_actor = nn.Sequential(
-            self.ff_actor_1,
-            self.ff_actor_2
-        )
-
-        self.feed_forward_critic = nn.Sequential(
-            self.ff_critic_1,
-            self.ff_critic_2
-        )
-
-        self.ff_actor = nn.Linear(512, actor_output)
-        self._actor = nn.Sequential(
-            self.ff_actor
-        )
-
-        self.ff_critic = nn.Linear(512, critic_output)
-        self._critic = nn.Sequential(
-            self.ff_critic
-        )
-
-        self.optimizer = torch.optim.Adam(
-            [
-                {"params": self.conv_filters_actor.parameters(), "lr": config["CONV_LEARN_RATE"]},
-                {"params": self.conv_filters_critic.parameters(), "lr": config["CONV_LEARN_RATE"]},
-                {"params": self.feed_forward_actor.parameters(), "lr": config["ACTOR_LEARN_RATE"]},
-                {"params": self.feed_forward_critic.parameters(), "lr": config["CRITIC_LEARN_RATE"]},
-                {"params": self._actor.parameters(), "lr": config["ACTOR_LEARN_RATE"]},
-                {"params": self._critic.parameters(), "lr": config["CRITIC_LEARN_RATE"]},
-            ]
-        )
-
-        self.to(self.device)
+                net.make_conv2d(64, 128, kernel_size=(1, 3), padding=1),
+                net.make_conv2d(128, 128, kernel_size=(1, 1), padding=1),
+                net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1),
+                nn.Flatten(),
+                net.Output("conv")
+            ), config["CONV_LEARN_RATE"]),
+            "actor_head": net.Lr(nn.Sequential(
+                net.Input("conv"),
+                net.make_lazy_linear(128, p),
+                net.make_linear(128, 512, p),
+                nn.Linear(512, ACTOR_OUTPUT),
+                net.Output("action_logits")
+            ), config["ACTOR_LEARN_RATE"]),
+            "critic_head": net.Lr(nn.Sequential(
+                net.Input("conv"),
+                net.make_lazy_linear(128, p),
+                net.make_linear(128, 512, p),
+                nn.Linear(512, CRITIC_OUTPUT),
+                net.Output("state_value")
+            ), config["CRITIC_LEARN_RATE"])
+        },
+        default_lr=config["CONV_LEARN_RATE"], device=device
+    )
 
 
-    def zero(self):
-        self.optimizer.zero_grad()
+def step(self, batch: tuple) -> float:
+    b_state, b_action, b_logprob, b_advantages, b_returns = batch
 
-    def calculate_internal_state(self, x):
-        conv_out_actor = self.conv_filters_actor(x)
-        conv_out_critic = self.conv_filters_critic(x)
+    self.model(b_state)
+    logits = self.model["action_logits"]
+    dist = torch.distributions.Categorical(logits=logits)
+    action_logprob = dist.log_prob(b_action)
+    entropy = dist.entropy()
 
-        flat_actor = conv_out_actor.flatten(start_dim=1)
-        flat_critic = conv_out_critic.flatten(start_dim=1)
-        feed_out_actor = self.feed_forward_actor(flat_actor)
-        feed_out_critic = self.feed_forward_critic(flat_critic)
+    state_values1 = self.model["state_value"]
+    state_values = state_values1.squeeze(dim=1)
 
-        return feed_out_actor, feed_out_critic
+    # PPO Surrogate Objective
+    importance_ratio = torch.exp(action_logprob - b_logprob)
+    surrogate = importance_ratio * b_advantages
+    clipped_surrogate = torch.clamp(importance_ratio, 1 - self.config["CLIP_EPSILON"],
+                                    1 + self.config["CLIP_EPSILON"]) * b_advantages
 
-    def forward(self, _):
-        self.compute(_)
-        return self.act(), self.critic()
+    actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.config["ENTROPY"] * entropy)
+    critic_loss = torch.functional.F.mse_loss(state_values, b_returns)
+    total_loss = (actor_loss + (critic_loss * 0.5) * 0.01).mean()
 
-    def step(self) -> None:
-        self.optimizer.step()
+    self.model.zero()
+    total_loss.mean().backward()
+    self.model.step()
 
-    def compute(self, state):
-        self.cache.clear()
-        state_actor, state_critic = self.calculate_internal_state(state)
-        self.cache["act"] = self._actor(state_actor)
-        self.cache["critic"] = self._critic(state_critic)
+    return total_loss.item()
 
-    def act(self):
-        return self.cache["act"]
-
-    def critic(self):
-        return self.cache["critic"]
-
-    def extra_learn(self, state):
-        return 0
-
-    def save(self, file):
-        try:
-            if file:
-                torch.save(self.state_dict(), file)
-        except KeyboardInterrupt:
-            print("wait until save!")
-            self.save(file)
-
-    def load(self, file):
-        if file is not None and pathlib.Path(file).exists():
-            self.load_state_dict(torch.load(file, weights_only=True, map_location=self.device))
-        return self
-
-class PPOExperienceGenerator:
-    def __init__(self, config, engine: tetris.Matris, model: net.ActorCriticNetwork):
-        self.engine: tetris.Matris = engine
-        self.model: net.ActorCriticNetwork = model
-        self.config = config
-
-
-    def generate(self):
-        buffer = ERMBuffer[PPOExperience]()
-        self.model.eval()
-        runs_progress = tqdm(
-            range(self.config["MAX_EPISODES"]),
-            desc="Runs",
-            dynamic_ncols=True,
-            leave=False,
-            position=1
-        )
-        state = self.engine.reset()
-        trajectory = Trajectory(PPOExperience)
-        for _ in runs_progress:
-            episode_progress = tqdm(
-                range(self.config["MAX_EPISODE_LENGTH"]),
-                desc="Experiences",
-                dynamic_ncols=True,
-                leave=False,
-                position=2
-            )
-            for _ in episode_progress:
-                state_tensor = torch.Tensor(state).unsqueeze(0).to(self.model.device)
-
-                with torch.no_grad():
-                    self.model.compute(state_tensor)
-                    state_value = self.model.critic()
-                    logits = self.model.act()
-
-                dist = torch.distributions.Categorical(logits=logits)
-                action = dist.sample()
-                logprob = dist.log_prob(action)
-
-                state, reward, lines_cleared, game_over, truncated = self.engine.step(tetris.Action(action.item()))
-                reward = torch.tensor([reward]).to(self.model.device)
-                done = torch.tensor([int(game_over or (truncated and self.config["MATRIS_TRUNCATE_HARD_BOUNARY"]))]).to(self.model.device)
-
-                experience = PPOExperience(state_tensor.detach(), action, reward, done, logprob, state_value)
-                trajectory.append(experience)
-
-                if game_over:
-                    trajectory.set_last_value(0) # Value is masked out anyway
-                    buffer.append(trajectory)
-                    trajectory = Trajectory(PPOExperience)
-
-                    state = self.engine.reset()
-                    break
-
-                if truncated:
-                    state_tensor = torch.Tensor(state).unsqueeze(0).to(self.model.device)
-                    self.model.compute(state_tensor)
-                    trajectory.set_last_value(self.model.critic()) # Value is masked out.
-                    buffer.append(trajectory)
-                    trajectory = Trajectory(PPOExperience)
-                    if self.config["BREAK_ON_TRUNCATE"]:
-                        break
-
-
-        return buffer
-
-class PPOTrainer:
-    def __init__(self, config, model: net.ActorCriticNetwork, generator: PPOExperienceGenerator):
-        self.model = model
-        self.generator = generator
-        self.config = config
-
-    def step(self, batch, progress):
-        b_state, b_action, b_logprob, b_advantages, b_returns = batch
-
-        b_state = b_state.to(self.model.device)
-        b_action = b_action.to(self.model.device)
-        b_logprob = b_logprob.to(self.model.device)
-        b_advantages = b_advantages.to(self.model.device)
-        b_returns = b_returns.to(self.model.device)
-
-        self.model.compute(b_state)
-        logits = self.model.act()
-        dist = torch.distributions.Categorical(logits=logits)
-        action_logprob = dist.log_prob(b_action)
-        entropy = dist.entropy()
-
-        state_values1 = self.model.critic()
-        state_values = state_values1.squeeze(dim=1)
-
-        # PPO Surrogate Objective
-        importance_ratio = torch.exp(action_logprob - b_logprob)
-        surrogate = importance_ratio * b_advantages
-        clipped_surrogate = torch.clamp(importance_ratio, 1 - self.config["CLIP_EPSILON"],
-                                        1 + self.config["CLIP_EPSILON"]) * b_advantages
-
-        actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.config["ENTROPY"] * entropy)
-        actor_loss = actor_loss.mean()
-        critic_loss = F.mse_loss(state_values, b_returns)
-        critic_loss = critic_loss.mean()
-
-
-        self.model.extra_learn(b_state)
-
-        self.model.zero()
-        critic_loss.backward()
-        actor_loss.backward()
-        progress.set_postfix(actor_loss=actor_loss.mean().item(), critic_loss=critic_loss.mean().item())
-        self.model.step()
-
-        return critic_loss.mean().item(), actor_loss.mean().item()
-
-    def train(self):
-        t0 = time.process_time()
-        with torch.no_grad():
-            buffer = self.generator.generate()
-            t1 = time.process_time()
-
-            tensors = buffer.to_tensors()
-            advantages, returns = buffer.compute_gae(self.config["GAMMA"], self.config["LAMBDA"])
-
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-            dataset = torch.utils.data.TensorDataset(
-                tensors["state"],
-                tensors["action"],
-                tensors["logprob"],
-                advantages,
-                returns
-            )
-
-            loader = torch.utils.data.DataLoader(dataset, batch_size=self.config["BATCH_SIZE"], shuffle=self.config["SHUFFLE_EXPERIENCES"])
-
-        epochs_progress = tqdm(
-            range(self.config["EPOCHS"]),
-            desc="Epochs",
-            dynamic_ncols=True,
-            leave=False,
-            position=1
-        )
-
-        self.model.train()
-        total_loss = 0
-        total_critic_loss = 0
-        total_actor_loss = 0
-        total_batches = 0
-        for _ in epochs_progress:
-            for batch in loader:
-                critic_loss, actor_loss= self.step(batch, epochs_progress)
-                total_critic_loss += critic_loss
-                total_actor_loss += actor_loss
-                total_batches += 1
-
-        t2 = time.process_time()
-        average_returns, _ = buffer.compute_returns(self.config["GAMMA"])
-        average_returns = average_returns.mean()
-        time_taken = t2 - t0
-        collection_time = t1 - t0
-        return (average_returns, time_taken, collection_time,
-                total_loss / total_batches, total_critic_loss / total_batches, total_actor_loss / total_batches)
 
 class NetworkRealtimeVisualizer:
     def __init__(self, width=520, height=520):
