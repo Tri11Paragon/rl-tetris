@@ -228,6 +228,7 @@ class ExperienceGenerator[T: Experience]:
         self.config = config
         self.experience_type = experience_type
         self.field_names = [field.name for field in fields(experience_type)]
+        self.states = self.state_storage()
 
     def state_storage(self):
         return np.ndarray((self.config["PARALLEL_ENVS"], 2, tetris.MATRIX_HEIGHT, tetris.MATRIX_WIDTH), dtype=np.uint8)
@@ -242,9 +243,8 @@ class ExperienceGenerator[T: Experience]:
             leave=False,
             position=1
         )
-        states = self.state_storage()
         for i, engine in enumerate(self.engines):
-            states[i] = engine.current_state()
+            self.states[i] = engine.current_state()
         trajectories = [Trajectory() for _ in range(self.config["PARALLEL_ENVS"])]
         for _ in runs_progress:
             episode_progress = tqdm(
@@ -256,7 +256,7 @@ class ExperienceGenerator[T: Experience]:
             )
             finished = [False] * self.config["PARALLEL_ENVS"]
             for _ in episode_progress:
-                state_tensor = torch.Tensor(states).to(self.model.device)
+                state_tensor = torch.Tensor(self.states).to(self.model.device)
 
                 with torch.no_grad():
                     self.model(state_tensor)
@@ -293,13 +293,14 @@ class ExperienceGenerator[T: Experience]:
                         data_dict["next_state"] = torch.tensor(state)
 
                     trajectories[i].append(data_dict)
+                    self.states[i] = state
 
                     if game_over:
                         trajectories[i].set_last_value(0) # Value is masked out anyway
                         buffer.append(trajectories[i])
                         trajectories[i] = Trajectory()
 
-                        states[i] = self.engines[i].reset()
+                        self.states[i] = self.engines[i].reset()
                         finished[i] = True
                     elif truncated:
                         if not is_done:
@@ -311,10 +312,6 @@ class ExperienceGenerator[T: Experience]:
                         trajectories[i] = Trajectory()
                         if self.config["BREAK_ON_TRUNCATE"]:
                             finished[i] = True
-                        else:
-                            states[i] = state
-                    else:
-                        states[i] = state
 
                 if all(finished):
                     break
@@ -330,12 +327,15 @@ class NetworkEpochTrainer[T: Experience]:
 
         if isinstance(self.model, list):
             self.device = self.model[0].device
+            self.train = lambda: (network.train() for network in self.model)
         elif isinstance(self.model, dict):
             self.device = next(iter(self.model.values())).device
+            self.train = lambda: (network.train() for network in self.model.values())
         else:
             self.device = self.model.device
+            self.train = self.model.train
 
-    def train(self) -> tuple[float | int, int]:
+    def build_dataset(self, progress_bar = None):
         with torch.no_grad():
             buffer = self.generator.generate()
 
@@ -343,6 +343,15 @@ class NetworkEpochTrainer[T: Experience]:
 
             loader = torch.utils.data.DataLoader(dataset, batch_size=self.config["BATCH_SIZE"], shuffle=self.config["SHUFFLE_EXPERIENCES"])
 
+        if progress_bar:
+            progress_bar.set_postfix({
+                "Gathered Experiences": len(buffer)
+            })
+
+        self.train()
+        return loader, buffer
+
+    def train(self) -> tuple[float, float]:
         epochs_progress = tqdm(
             range(self.config["EPOCHS"]),
             desc="Epochs",
@@ -351,17 +360,53 @@ class NetworkEpochTrainer[T: Experience]:
             position=1
         )
 
-        epochs_progress.set_postfix({
-            "Gathered Experiences": len(buffer)
-        })
+        loader, buffer = self.build_dataset(epochs_progress)
 
         total_loss = 0
         total_batches = 0
 
-        self.model.train()
         for _ in epochs_progress:
             for batch in loader:
                 total_loss += self.step_func(self, tuple(b.to(self.device) for b in batch))
                 total_batches += 1
 
-        return total_loss, total_batches
+        return float(total_loss), float(total_batches)
+
+class NetworkLossTrainer[T: Experience](NetworkEpochTrainer[T]):
+    def train(self) -> tuple[float | int, int]:
+        epochs_progress = tqdm(
+            None,
+            desc="Epochs",
+            dynamic_ncols=True,
+            leave=False,
+            position=1
+        )
+
+        loader, buffer = self.build_dataset()
+
+        min_loss = float("inf")
+        last_update = 0
+
+        while True:
+            total_loss = 0
+            batches = 0
+
+            for batch in loader:
+                total_loss += self.step_func(self, tuple(b.to(self.device) for b in batch))
+                batches += 1
+            avg_loss = abs(float(total_loss) / float(batches))
+
+            epochs_progress.update(1)
+            if avg_loss < min_loss:
+                min_loss = avg_loss
+                last_update = epochs_progress.n
+
+            if epochs_progress.n - last_update > self.config["EPOCHS"] // 10:
+                break
+
+        return min_loss, last_update
+
+
+
+
+

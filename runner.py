@@ -6,6 +6,7 @@ import random
 from matplotlib import pyplot as plt
 
 import MaTris.matris
+import default_config
 import experience
 import graph
 import ppo2 as ppo
@@ -15,11 +16,13 @@ import argparse
 import json
 import pickle
 import os
+import subprocess
 
 import MaTris.matris as tetris
 import torch
 from tqdm.auto import tqdm
 from pathlib import Path
+from config import Config
 
 from experience import PPOExperience
 
@@ -45,105 +48,14 @@ parser_trainer.add_argument("-r", "--refresh", "--reset", action="store_true", h
 parser_initializer = subparsers.add_parser("init")
 parser_initializer.add_argument("file", type=str)
 
-class Config:
-    def __init__(self, file, default):
-        self.file = Path(file)
-        self.default = Path(default)
-        self.config = {}
-
-    def load(self):
-        self.load_self()
-        # self.load_defaults()
-        self.set_defaults()
-        return self.config
-
-    def save_defaults(self):
-        self.load_defaults()
-        self.set_defaults()
-        json.dump(self.config, self.default.open(mode="w"), indent=4)
-        return self
-
-    def reset_defaults(self):
-        self.set_defaults()
-        json.dump(self.config, self.default.open(mode="w"), indent=4)
-        return self
-
-    def update(self, key, value):
-        if key not in self.config:
-            self.config[key] = value
-
-    def load_self(self):
-        if self.file.exists():
-            self.config = json.load(self.file.open(mode="r"))
-
-    def load_defaults(self):
-        if self.default.exists():
-            local_config = json.load(self.default.open(mode="r"))
-            for key, value in local_config.items():
-                self.update(key, value)
-
-    def set_defaults(self):
-        self.update("CONV_LEARN_RATE", 1e-5)
-        self.update("ACTOR_LEARN_RATE", 1e-5)
-        self.update("CRITIC_LEARN_RATE", 1e-5)
-        self.update("DROPOUT", 0.2)
-        self.update("PARALLEL_ENVS", 32)
-        self.update("GAMMA", 0.99)
-        self.update("LAMBDA", 0.1)
-        self.update("SHUFFLE_EXPERIENCES", False)
-        self.update("MAX_EPISODE_LENGTH", 100)
-        self.update("MAX_EPISODES", 100)
-        self.update("EPOCHS", 10)
-        self.update("BATCH_SIZE", 64)
-        self.update("ENTROPY", 0.1)
-        self.update("CLIP_EPSILON", 0.2)
-        self.update("TEMPERATURE", 1.1)
-
-        self.update("PATIENCE", 100)
-        self.update("MIN_LEARN_RATE", 1e-6)
-        self.update("DECAY_RATE", 0.1)
-        self.update("ENTROPY_DECAY_AMOUNT", 0.01)
-        self.update("ENTROPY_MIN", 0.001)
-
-        self.update("SAVE_INTERVAL", 5)
-        self.update("CURRENT_PATIENCE", {})
-
-        self.update("MATRIS_DECAY", True)
-        self.update("MATRIS_ACTIONS_UNTIL_DROP", 10)
-        self.update("BREAK_ON_TRUNCATE", True)
-        self.update("MATRIS_EPISODIC_TRUNCATE", True) # If bot doesn't place within placement horizon moves, the episode is truncated.
-        self.update("MATRIS_EPISODIC_PLACEMENT_HORIZON", 50)
-        self.update("MATRIS_PLACEMENT_TRUNCATES", True) # Include normal placement as an episode boundary
-        self.update("MATRIS_TRUNCATE_HARD_BOUNARY", True)
-
-        self.update("MATRIS_GAMEOVER_PENALTY", 100)
-        self.update("MATRIS_TRUNCATE_PENALTY", 10)
-
-        self.update("MATRIS_AVOID_CYCLIC_STATES", True)
-        self.update("MATRIS_CYCLIC_STATE_PENALTY", 1)
-        self.update("MATRIS_CYCLIC_STATE_MAX_ROTATES", 4)
-
-        self.update("MATRIS_AVOID_REPEATED_EDGE_STATES", True)
-        self.update("MATRIS_REPEATED_EDGE_STATE_PENALTY", 1)
-
-        # self.update("MATRIS_EARLY_ROTATE_REWARD", 0.1)
-        # self.update("MATRIS_EARLY_ROTATE_THRESHOLD", 4)
-        #
-        # self.update("MATRIS_EARLY_MOVE_REWARD", 0.1)
-        # self.update("MATRIS_EARLY_MOVE_THRESHOLD", 4)
-
-        self.update("MATRIS_ENCOURAGE_REWARD", 1)
-        self.update("MATRIS_ENCOURAGED_ACTIONS", ["HARD_DROP", "DOWN"])
-        self.update("MATRIS_DISCOURAGE_PENALTY", 0.1)
-        self.update("MATRIS_DISCOURAGED_ACTIONS", ["ROTATE"])
 
 class Runner:
     def __init__(self, file, location="experiments"):
         self.file = file
         self.location = location
         self.folder = Path(location) / file
-        self.config_path = self.folder / "config.json"
-        self.config = {}
+        self.config_path = self.folder / "config.nix"
+        self.config = Config(self.config_path).load()
         self.object_storage = {}
         self.run_data = defaultdict(list, {
             "runs": 0
@@ -165,7 +77,7 @@ class Runner:
     def init_run(self):
         self.folder.mkdir(parents=True, exist_ok=True)
 
-        self.config = Config(self.config_path, Path.cwd() / "default_config.json").load()
+        self.config = Config(self.config_path).load()
 
         # object_path = self.folder / "objects.pkl"
         # if object_path.exists():
@@ -176,7 +88,6 @@ class Runner:
             self.run_data = defaultdict(list, json.load(loss_path.open(mode="r")))
 
         self.save()
-        json.dump(self.config, (self.folder / "init_config.json").open(mode="w"), indent=4)
 
     def save_network(self, network_name):
         if network_name in self.object_storage:
@@ -186,7 +97,6 @@ class Runner:
 
     def save(self):
         self.folder.mkdir(parents=True, exist_ok=True)
-        json.dump(self.config, self.config_path.open(mode="w"), indent=4)
 
         # object_path = self.folder / "objects.pkl"
         # pickle.dump(self.object_storage, object_path.open(mode="wb"))
@@ -243,7 +153,7 @@ def test_ppo(args):
     returns = []
 
     from experience import Trajectory, PPOExperience
-    trajectory = Trajectory(PPOExperience)
+    trajectory = Trajectory()
     try:
         while True:
             try:
@@ -259,24 +169,24 @@ def test_ppo(args):
 
             if pygame.K_q in game.extra_keys:
                 state_tensor = torch.Tensor(state).unsqueeze(0).to(network.device)
-                network.compute(state_tensor)
-                logits = network.act()
+                network(state_tensor)
+                logits = network["action_logits"]
                 dist = torch.distributions.Categorical(logits=logits)
                 action = torch.argmax(logits).item()
 
-                visualizer.update(state, logits.squeeze().cpu(), dist.probs.squeeze().cpu(), network.critic().item(), action)
+                visualizer.update(state, logits.squeeze().cpu(), dist.probs.squeeze().cpu(), network["state_value"].item(), action)
 
             if pygame.K_v in game.extra_keys or run:
                 state_tensor = torch.Tensor(state).unsqueeze(0).to(network.device)
-                network.compute(state_tensor)
-                logits = network.act()
+                network(state_tensor)
+                logits = network["action_logits"]
                 dist = torch.distributions.Categorical(logits=logits)
                 # action = dist.sample().item()
                 action = torch.argmax(logits).item()
                 probs.append(dist.probs.squeeze())
                 actions.append(tetris.Action(action))
 
-                visualizer.update(state, logits.squeeze().cpu(), dist.probs.squeeze().cpu(), network.critic().item(), action)
+                visualizer.update(state, logits.squeeze().cpu(), dist.probs.squeeze().cpu(), network["state_value"].item(), action)
 
             if best and not run:
                 actions.extend(engine.best_action_set())
@@ -288,11 +198,11 @@ def test_ppo(args):
 
             for action in actions:
                 state_tensor = torch.Tensor(state).unsqueeze(0).to(network.device)
-                network.compute(state_tensor)
-                logits = network.act()
+                network(state_tensor)
+                logits = network["action_logits"]
                 dist = torch.distributions.Categorical(logits=logits)
 
-                print(f"Critic says state is: {network.critic().item()} | ", end='')
+                print(f"Critic says state is: {network["state_value"].item()} | ", end='')
                 next_state, reward, lines_cleared, game_over, truncated = engine.step(action)
 
                 print(f"Reward was: {reward}")
@@ -318,7 +228,7 @@ def test_ppo(args):
                         episodes.append( (torch.stack(probs), discounted_rewards, np_rewards) )
                         probs.clear()
                     returns.clear()
-                    trajectory.set_last_value(network.critic())
+                    trajectory.set_last_value(network["state_value"])
                     raise SystemExit("Game Over")
     except SystemExit or KeyboardInterrupt or MaTris.matris.GameOver:
         location = Path(runner.location) / runner.file / "runs"/ time.strftime("%Y-%m-%d_%H-%M-%S")
