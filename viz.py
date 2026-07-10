@@ -1,13 +1,16 @@
 import argparse
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
 import numpy as np
 import json
 import pickle
 from pathlib import Path
+import config
 
 
 def rolling_average(values, window):
     values = np.asarray(values, dtype=float)
+    values = np.nan_to_num(values, False, 0)
     if window <= 1:
         return np.arange(len(values)), values
     if window > len(values):
@@ -23,47 +26,53 @@ def main():
     parser.add_argument("file")
     args = parser.parse_args()
 
-    rolling_window = 10
+    rolling_window = 50
+
+    cfg = config.Config(Path(args.location) / args.file / "config.nix").load()
 
     with open(str(Path(args.location) / args.file / "state.json"), "r") as f:
         data = json.load(f)
 
-    loss_profiles = []
-    if "actor_loss" in data and len(data["actor_loss"]) > 0:
-        loss_profiles.append(("actor_loss", data["actor_loss"]))
-    if "critic_loss" in data and len(data["critic_loss"]) > 0:
-        loss_profiles.append(("critic_loss", data["critic_loss"]))
-    if "loss" in data and len(data["loss"]) > 0:
-        loss_profiles.append(("loss", data["loss"]))
-    if "returns" in data and len(data["returns"]) > 0:
-        loss_profiles.append(("returns", data["returns"]))
+    def build_loss(window: int):
+        return [(name, value, rolling_average(value, window)) for name, value in data.items() if type(value) == list]
 
-    averaged_loss_profiles = [
-        (name, value, rolling_average(value, rolling_window)) for name, value in loss_profiles
-    ]
+    averaged_loss_profiles = build_loss(rolling_window)
 
     fig, axes = plt.subplots(
-        max(len(loss_profiles), 2),
-        3,
+        len(averaged_loss_profiles),
         sharex="col",
         figsize=(18, 8),
     )
 
+    if len(averaged_loss_profiles) == 1:
+        axes = [axes]
+
+    rolling_lines = []
+
+    ax_slider = plt.axes((0.1, 0.01, 0.8, 0.03))
+    a_slider = Slider(
+        ax=ax_slider,
+        label="Rolling Window",
+        valmin=10,
+        valmax=250,
+        valinit=rolling_window,
+        valstep=1,
+    )
+
     for row, (label, values, avg) in enumerate(averaged_loss_profiles):
-        ax = axes[row, 0]
-        derivative_ax = axes[row, 1]
-        second_derivative_ax = axes[row, 2]
+        ax = axes[row]
 
         ax.plot(values, label=label, alpha=0.45)
 
         x, averaged = avg
-        ax.plot(
+        rolling_line, = ax.plot(
             x,
             averaged,
             color="tab:gray",
             label=f"{label} rolling avg ({rolling_window})",
             linewidth=2,
         )
+        rolling_lines.append((rolling_line, values, label, ax))
 
         ax.axhline(
             0,
@@ -73,79 +82,29 @@ def main():
             alpha=0.7,
         )
 
-        if len(averaged) > 1:
-            derivative = np.gradient(values)
-            x2, deravg = rolling_average(derivative, rolling_window)
-
-            derivative_ax.plot(
-                derivative,
-                label=f"d/dstep rolling avg {label}",
-                color="tab:gray",
-                linewidth=2,
-                alpha=0.45
-            )
-
-            derivative_ax.plot(
-                x2,
-                deravg,
-                label=f"d/dstep {label} rolling avg",
-                color="tab:red",
-                linewidth=2,
-            )
-
-            derivative_ax.axhline(
-                0,
-                color="black",
-                linestyle="--",
-                linewidth=1,
-                alpha=0.7,
-            )
-
-            if len(deravg) > 1:
-                second_derivative = np.gradient(derivative)
-                x3, second_deravg = rolling_average(second_derivative, rolling_window)
-
-                second_derivative_ax.plot(
-                    second_derivative,
-                    label=f"d²/dstep² smoothed {label}",
-                    color="tab:gray",
-                    linewidth=2,
-                    alpha=0.45,
-                )
-
-                second_derivative_ax.plot(
-                    x3,
-                    second_deravg,
-                    label=f"d²/dstep² {label} rolling avg",
-                    color="tab:blue",
-                    linewidth=2,
-                )
-
-                second_derivative_ax.axhline(
-                    0,
-                    color="black",
-                    linestyle="--",
-                    linewidth=1,
-                    alpha=0.7,
-                )
-
         ax.set_ylabel(label)
         ax.legend()
         ax.grid(True, alpha=0.3)
+        ax.set_xlabel("step")
 
-        derivative_ax.set_ylabel("slope")
-        derivative_ax.legend()
-        derivative_ax.grid(True, alpha=0.3)
+    def update_rolling_window(value):
+        window = int(value)
 
-        second_derivative_ax.set_ylabel("curvature")
-        second_derivative_ax.legend()
-        second_derivative_ax.grid(True, alpha=0.3)
+        for rolling_line, values, label, ax in rolling_lines:
+            x, averaged = rolling_average(values, window)
+            rolling_line.set_data(x, averaged)
+            rolling_line.set_label(f"{label} rolling avg ({window})")
+            ax.legend()
+            ax.relim()
+            ax.autoscale_view()
 
-    axes[-1, 0].set_xlabel("step")
-    axes[-1, 1].set_xlabel("step")
-    axes[-1, 2].set_xlabel("step")
-    fig.suptitle("Loss Profiles, Rolling Average Derivatives, and Second Derivatives")
+        fig.canvas.draw_idle()
+
+    a_slider.on_changed(update_rolling_window)
+
+    fig.suptitle(f"Recorded attributes for {args.file} with network '{cfg.network.type}'")
     fig.tight_layout()
+    plt.subplots_adjust(bottom=0.1)
     plt.show()
 
 

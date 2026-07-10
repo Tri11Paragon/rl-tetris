@@ -9,8 +9,17 @@
     helpers = rec {
         e = math.pow 10;
         e- = x: e (-x);
+        sequential = x: "nn.Sequential(${x})";
     };
 
     default = import ./defaults.nix helpers;
     config = if builtins.pathExists path then import path helpers else {};
-in lib.recursiveUpdate default config
+
+    updated_attribs = lib.recursiveUpdate default config;
+
+    python_types = import ./gentypes.nix updated_attribs;
+
+in {
+    config_data=updated_attribs;
+    python=python_types;
+}

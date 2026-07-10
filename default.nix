@@ -1,6 +1,9 @@
 let
   pkgs = import <nixpkgs> {};
   unstable = import <nixos-unstable> { allowUnfree = true; config.allowUnfree = true; };
+
+  gpuVendor = builtins.getEnv "GPU_VENDOR";
+
   python = (unstable.python314.withPackages (python-pkgs: [
 #      python-pkgs.gymnasium
       python-pkgs.pybox2d
@@ -10,10 +13,17 @@ let
       python-pkgs.pygame
       python-pkgs.tqdm
       python-pkgs.opencv4
+      python-pkgs.openai
 #      python-pkgs.tensorboard
 #      python-pkgs.tensorflow
-      python-pkgs.torchWithRocm
-    ]));
+#      python-pkgs.torchWithRocm
+    ] ++ (
+      if gpuVendor == "CUDA" then
+        [ python-pkgs.torchWithCuda ]
+      else
+        [ python-pkgs.torchWithRocm ]
+    )
+    ));
 in pkgs.mkShell {
   packages = [
 	unstable.jetbrains.pycharm

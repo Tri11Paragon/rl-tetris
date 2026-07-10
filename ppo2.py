@@ -1,31 +1,9 @@
-import json
-import math
-import pathlib
-import pickle
-import random
-from array import array
-
-from matplotlib import pyplot as plt
-from tqdm.auto import tqdm
-from typing import Any
-
-import MaTris.matris as tetris
 import pygame
 import numpy as np
-import cv2
 import torch
 from torch import nn
-import torch.nn.functional as F
 
-from MaTris.matris import MATRIX_WIDTH, MATRIX_HEIGHT
-from experience import ERMBuffer, PPOExperience, Trajectory
-import argparse
-import time
-import graph
-
-from collections import namedtuple, deque
-
-from MaTris.matris import GameOver
+from config import DotDict
 
 import network as net
 
@@ -34,12 +12,9 @@ CRITIC_OUTPUT = 1
 
 
 # http://vision.stanford.edu/teaching/cs231n/reports/2016/pdfs/121_Report.pdf
-def AdjustedSandfordNetwork(config, device = None):
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device} | HIP: {getattr(torch.version, 'hip', None) or getattr(torch.version, 'cuda', None)}")
-
-    p = config["DROPOUT"]
+def AdjustedSandfordNetwork(config: DotDict, device = None):
+    device = net.get_device(device)
+    p = config.network.dropout
     return net.Network(
         {
             "conv_filters": net.Lr(nn.Sequential(
@@ -54,31 +29,34 @@ def AdjustedSandfordNetwork(config, device = None):
                 net.make_conv2d(128, 128, kernel_size=(1, 3), padding=1),
                 nn.Flatten(),
                 net.Output("conv")
-            ), config["CONV_LEARN_RATE"]),
+            ), config.network.init_lr.convLearnRate),
             "actor_head": net.Lr(nn.Sequential(
                 net.Input("conv"),
                 net.make_lazy_linear(128, p),
                 net.make_linear(128, 512, p),
                 nn.Linear(512, ACTOR_OUTPUT),
                 net.Output("action_logits")
-            ), config["ACTOR_LEARN_RATE"]),
+            ), config.network.init_lr.actorLearnRate),
             "critic_head": net.Lr(nn.Sequential(
                 net.Input("conv"),
                 net.make_lazy_linear(128, p),
                 net.make_linear(128, 512, p),
                 nn.Linear(512, CRITIC_OUTPUT),
                 net.Output("state_value")
-            ), config["CRITIC_LEARN_RATE"])
+            ), config.network.init_lr.criticLearnRate)
         },
-        default_lr=config["CONV_LEARN_RATE"], device=device
+        default_lr=config.network.init_lr.convLearnRate, device=device
     )
 
 
-def step(self, batch: tuple) -> float:
+def step(self: net.TrainerType , batch: tuple) -> float:
     b_state, b_action, b_logprob, b_advantages, b_returns = batch
+
+    assert(isinstance(self.model, net.Network))
 
     self.model(b_state)
     logits = self.model["action_logits"]
+
     dist = torch.distributions.Categorical(logits=logits)
     action_logprob = dist.log_prob(b_action)
     entropy = dist.entropy()
@@ -89,12 +67,15 @@ def step(self, batch: tuple) -> float:
     # PPO Surrogate Objective
     importance_ratio = torch.exp(action_logprob - b_logprob)
     surrogate = importance_ratio * b_advantages
-    clipped_surrogate = torch.clamp(importance_ratio, 1 - self.config["CLIP_EPSILON"],
-                                    1 + self.config["CLIP_EPSILON"]) * b_advantages
+    clipped_surrogate = torch.clamp(importance_ratio, 1 - self.config.network.ppo.clipEpsilon,
+                                    1 + self.config.network.ppo.clipEpsilon) * b_advantages
 
-    actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.config["ENTROPY"] * entropy)
-    critic_loss = torch.functional.F.mse_loss(state_values, b_returns)
+    actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.config.network.ppo.entropy * entropy)
+    critic_loss = torch.nn.functional.mse_loss(state_values, b_returns)
     total_loss = (actor_loss + (critic_loss * 0.5) * 0.01).mean()
+
+    self.storage["kl_batch_estimate"].append(self.kl_approx(b_logprob, action_logprob).mean().item())
+    # self.runner.log_to_list("kl_estimate", kl_estimate)
 
     self.model.zero()
     total_loss.mean().backward()
@@ -104,40 +85,30 @@ def step(self, batch: tuple) -> float:
 
 
 class NetworkRealtimeVisualizer:
-    def __init__(self, width=520, height=520):
-        from pygame._sdl2.video import Window, Renderer
-
-        self.width = width
-        self.height = height
-        self.window = Window("Network View", size=(width, height), position=(900, 100))
-        self.renderer = Renderer(self.window)
+    def __init__(self, surface: pygame.Surface, rect):
+        self.rect = rect
+        self.surface = surface
         self.font = pygame.font.Font(None, 24)
         self.small_font = pygame.font.Font(None, 18)
 
     def clear(self, color=(12, 12, 18, 255)):
-        self.renderer.draw_color = color
-        self.renderer.clear()
+        self.surface.fill(color, self.rect)
 
     def present(self):
-        self.renderer.present()
+        pass
 
     def fill_rect(self, rect, color):
-        self.renderer.draw_color = color
-        self.renderer.fill_rect(rect)
+        self.surface.fill(color, rect)
 
     def draw_rect(self, rect, color):
-        self.renderer.draw_color = color
-        self.renderer.draw_rect(rect)
+        pygame.draw.rect(self.surface, color, rect, width=1)
 
     def draw_text(self, text, x, y, color=(240, 240, 240), small=False):
-        from pygame._sdl2.video import Texture
-
         font = self.small_font if small else self.font
         text_surface = font.render(text, True, color[:3])
-        texture = Texture.from_surface(self.renderer, text_surface)
 
         target = pygame.Rect(x, y, text_surface.get_width(), text_surface.get_height())
-        texture.draw(dstrect=target)
+        self.surface.blit(text_surface, target)
 
     def draw_grid_channel(self, channel, x0, y0, title, scale=14):
         self.draw_text(title, x0, y0 - 24)
@@ -160,11 +131,11 @@ class NetworkRealtimeVisualizer:
     def draw_action_probs(self, probs, logits, critic_value, selected_action=None):
         action_names = ["RIGHT", "LEFT", "DOWN", "ROTATE", "HARD_DROP"]
 
-        x0 = 230
+        x0 = self.rect[0] + 230
         y0 = 60
         bar_width = 220
         bar_height = 24
-        gap = 12
+        gap = 24
 
         self.draw_text("Actor output", x0, 25)
         self.draw_text(f"Critic: {critic_value:.4f}", x0, 330)
@@ -198,7 +169,7 @@ class NetworkRealtimeVisualizer:
             self.draw_text(
                 f"logit {float(logits[i]):+.3f}",
                 x0,
-                y + bar_height + 1,
+                y + bar_height + 6,
                 color=(180, 180, 180),
                 small=True
             )
@@ -208,8 +179,8 @@ class NetworkRealtimeVisualizer:
 
         state_np = np.asarray(state)
 
-        self.draw_grid_channel(state_np[0], 20, 55, "Board channel")
-        self.draw_grid_channel(state_np[1], 20, 365, "Piece channel", scale=6)
+        self.draw_grid_channel(state_np[0], self.rect[0] + 20, 55, "Board channel")
+        self.draw_grid_channel(state_np[1], self.rect[0] + 20, 365, "Piece channel", scale=6)
 
         self.draw_action_probs(probs, logits, critic_value, selected_action)
 

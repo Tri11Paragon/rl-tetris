@@ -1,43 +1,72 @@
 helpers: with helpers; {
-    PATIENCE = 100;
-    MIN_LEARN_RATE = e- 6;
-    DECAY_RATE = 0.1;
-    ENTROPY_DECAY_AMOUNT = 0.01;
-    ENTROPY_MIN = 0.001;
-
     network = {
+        # 'ppo' or 'dqn'
         type = "ppo";
-        lr = {
+        init_lr = {
             convLearnRate = e- 5;
             actorLearnRate = e- 5;
             criticLearnRate = e- 5;
         };
+        min_lr = {
+            convLearnRate = e- 7;
+            actorLearnRate = e- 7;
+            criticLearnRate = e- 7;
+        };
         dropout = 0.2;
         gamma = 0.9;
         ppo = {
-            lambda = 0.1;
+            lamda = 0.1;
             entropy = 0.1;
+            minEntropy = 0.001;
             clipEpsilon = 0.2;
         };
         dqn = {
             temperature = 1.1;
         };
+        model = {
+            conv_filters = {
+                modules = [
+                    {type="conv2d"; i=2; o=32; kernel=[3 3]; padding=1;}
+                ];
+                lr = "network.init_lr.convLearnRate";
+            };
+        };
     };
     training = {
-        type = "epoch";
+        type = "kl";
         batchSize = 64;
         saveInterval = 5;
         shuffle = false;
         epoch = {
             epochs = 10;
         };
+        kl = {
+            kl_cutoff = 0.03;
+            useEpochLimit = true;
+            log = false;
+        };
     };
     collection = {
+        # either 'runs' or 'experiences'
+        type = "experiences";
         experiences = {
             parallelEnvs = 1;
             maxExperiencesPerTrajectory = 100;
         };
+        erm = {
+            enabled = false;
+            minTrajectories = 10;
+            length = 10000;
+        };
         runs = 100;
+        minExperiences = 2000;
+    };
+    scheduler = {
+        decay = [
+            {init = "network.init_lr"; min = "network.min_lr"; factor = 0.1;}
+            {init = "network.ppo.entropy"; min="network.ppo.minEntropy"; factor=0.9;}
+        ];
+        patience = 100;
     };
     tetris = {
         decay = {
@@ -51,7 +80,7 @@ helpers: with helpers; {
             placementTimer = {
                 enabled = true;
                 value = 50;
-                reward = -10;
+                reward = -25;
             };
         };
         encouragedActions = {
@@ -67,11 +96,22 @@ helpers: with helpers; {
             cyclic = {
                 enabled = true;
                 maxRotates = 4;
-                reward = -1;
+                rotateHorizon = 12;
+                reward = -5;
             };
             edges = {
                 enabled = true;
-                reward = -1;
+                reward = -5;
+            };
+            earlyMove = {
+                enabled = true;
+                # if an action isn't in this it doesn't reward
+                actionsReward = [
+                    {name = "LEFT"; reward = 0.5;}
+                    {name = "RIGHT"; reward = 0.5;}
+                    {name = "ROTATE"; reward = 0.1;}
+                ];
+                cutoff = 0;
             };
         };
     };

@@ -1,4 +1,4 @@
-from collections import namedtuple, defaultdict
+from collections import namedtuple, defaultdict, deque
 from typing import Protocol, Any, Generic, TypeVar, overload, SupportsIndex
 from dataclasses import fields, dataclass
 import numpy as np
@@ -6,6 +6,9 @@ import MaTris.matris as tetris
 from tqdm.auto import tqdm
 import network as net
 import torch
+
+from config import DotDict
+
 
 # Trajectory holds a set of related experiences as part of an episode
 class Trajectory:
@@ -36,8 +39,9 @@ class Trajectory:
         discounted_returns = np.zeros(len(self), dtype=np.float32)
         rewards = self.buffer["reward"]
 
+        discounted_returns[-1] = rewards[-1]
         for i in reversed(range(len(self) - 1)):
-            discounted_returns[i] = self.buffer["done"][i] * discounted_returns[i + 1] * gamma + rewards[i]
+            discounted_returns[i] = (1.0 - self.buffer["done"][i]) * discounted_returns[i + 1] * gamma + rewards[i]
 
         return discounted_returns
 
@@ -97,15 +101,30 @@ class Trajectory:
         return reversed(self.buffer)
 
 class ERMBuffer:
-    def __init__(self):
-        self.buffer: list[Trajectory] = []
+    def __init__(self, config: DotDict):
+        self.config = config
+        self.buffer: deque[Trajectory] = deque()
+
+    def trim(self):
+        if not self.config.collection.erm.enabled:
+            return
+        while True:
+            if len(self.buffer) <= self.config.collection.erm.minTrajectories:
+                break
+            if len(self) < self.config.collection.erm.length:
+                break
+            self.buffer.popleft()
 
     def append(self, trajectory):
         self.buffer.append(trajectory)
+        self.trim()
 
     def clear(self):
-        for trajectory in self.buffer:
-            trajectory.clear()
+        self.buffer.clear()
+
+    def join(self, other: ERMBuffer):
+        self.buffer.extend(other.buffer)
+        self.trim()
 
     def compute_returns(self, gamma: float) -> tuple[np.ndarray, list[np.ndarray]]:
         average_returns = np.zeros(len(self.buffer), dtype=np.float32)
@@ -137,38 +156,16 @@ class ERMBuffer:
     def __len__(self):
         return sum(len(traj) for traj in self.buffer)
 
-
-@overload
-def sample(buffer: Trajectory, amount: int):
-    first_value = len(buffer)
-    size = len(buffer.buffer)
-    if size < amount:
-        raise ValueError("Cannot sample from empty buffer // buffer size is too small.")
-    indices = np.random.choice(size, size=amount, replace=False)
-    return {field: arr[indices] for field, arr in buffer.buffer.items()}
-
-@overload
-def sample(buffer: ERMBuffer, amount: int):
-    combined = defaultdict(list)
-    for trajectory in buffer.buffer:
-        for field, arr in trajectory.buffer.items():
-            combined[field].extend(arr)
-    size = len(next(iter(combined.values())))
-    if size < amount:
-        raise ValueError("Cannot sample from empty buffer // buffer size is too small.")
-    indices = np.random.choice(size, size=amount, replace=False)
-    return {field: arr[indices] for field, arr in combined.items()}
-
 @dataclass
 class Experience(Protocol):
     @staticmethod
-    def distribution(config: dict[str, Any], logits: torch.Tensor) -> tuple[torch.Tensor, torch.distributions.Distribution]:
+    def distribution(config: DotDict, logits: torch.Tensor) -> tuple[torch.Tensor, torch.distributions.Distribution]:
         dist = torch.distributions.Categorical(logits=logits)
         actions = dist.sample()
         return actions, dist
 
     @staticmethod
-    def build_dataset(config: dict[str, Any], buffer: ERMBuffer) -> torch.utils.data.Dataset:
+    def build_dataset(config: DotDict, buffer: ERMBuffer) -> torch.utils.data.Dataset:
         ...
 
 @dataclass
@@ -181,9 +178,9 @@ class PPOExperience(Experience):
     state_value: torch.Tensor
 
     @staticmethod
-    def build_dataset(config: dict[str, Any], buffer: ERMBuffer):
+    def build_dataset(config: DotDict, buffer: ERMBuffer):
         tensors = buffer.to_tensors()
-        advantages, returns = buffer.compute_gae(config["GAMMA"], config["LAMBDA"])
+        advantages, returns = buffer.compute_gae(config.network.gamma, config.network.ppo.lamda)
 
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -204,11 +201,11 @@ class DQNExperience(Experience):
     done: torch.Tensor
 
     @staticmethod
-    def distribution(config, logits):
-        return Experience.distribution(config, logits / config["TEMPERATURE"])
+    def distribution(config: DotDict, logits):
+        return Experience.distribution(config, logits / config.network.dqn.temperature)
 
     @staticmethod
-    def build_dataset(config: dict[str, Any], buffer: ERMBuffer):
+    def build_dataset(config: DotDict, buffer: ERMBuffer):
         tensors = buffer.to_tensors()
 
         return torch.utils.data.TensorDataset(
@@ -219,25 +216,33 @@ class DQNExperience(Experience):
             tensors["done"]
         )
 
+    @staticmethod
+    def post_train(trainer):
+        trainer.model["target"].load_state_dict(trainer.model["network"].state_dict())
+
 class ExperienceGenerator[T: Experience]:
-    def __init__(self, config, model: net.Network, experience_type: type[T]):
+    def __init__(self, config: DotDict, model: net.Network, experience_type: type[T]):
         self.engines: list[tetris.Matris] = []
-        for _ in range(config["PARALLEL_ENVS"]):
+        for _ in range(config.collection.experiences.parallelEnvs):
             self.engines.append(tetris.Matris(config))
         self.model: net.Network = model
         self.config = config
         self.experience_type = experience_type
+        self.experience_fields = fields(experience_type)
         self.field_names = [field.name for field in fields(experience_type)]
         self.states = self.state_storage()
+        self.buffer = ERMBuffer(self.config)
+        self.lines_cleared = []
 
     def state_storage(self):
-        return np.ndarray((self.config["PARALLEL_ENVS"], 2, tetris.MATRIX_HEIGHT, tetris.MATRIX_WIDTH), dtype=np.uint8)
+        return np.ndarray((self.config.collection.experiences.parallelEnvs, 2, tetris.MATRIX_HEIGHT, tetris.MATRIX_WIDTH), dtype=np.uint8)
 
     def generate(self):
-        buffer = ERMBuffer()
+        self.lines_cleared = []
+        buffer = ERMBuffer(self.config)
         self.model.eval()
         runs_progress = tqdm(
-            range(self.config["MAX_EPISODES"]),
+            range(self.config.collection.runs) if self.config.collection.type == "runs" else None,
             desc="Runs",
             dynamic_ncols=True,
             leave=False,
@@ -245,16 +250,22 @@ class ExperienceGenerator[T: Experience]:
         )
         for i, engine in enumerate(self.engines):
             self.states[i] = engine.current_state()
-        trajectories = [Trajectory() for _ in range(self.config["PARALLEL_ENVS"])]
-        for _ in runs_progress:
+        trajectories = [Trajectory() for _ in range(self.config.collection.experiences.parallelEnvs)]
+        run_iter = runs_progress
+        if self.config.collection.type == "experiences":
+            def nxt():
+                runs_progress.update(1)
+                return not (len(buffer) > self.config.collection.minExperiences)
+            run_iter = iter(nxt, False)
+        for _ in run_iter:
             episode_progress = tqdm(
-                range(self.config["MAX_EPISODE_LENGTH"]),
+                range(self.config.collection.experiences.maxExperiencesPerTrajectory),
                 desc="Experiences",
                 dynamic_ncols=True,
                 leave=False,
                 position=2
             )
-            finished = [False] * self.config["PARALLEL_ENVS"]
+            finished = [False] * self.config.collection.experiences.parallelEnvs
             for _ in episode_progress:
                 state_tensor = torch.Tensor(self.states).to(self.model.device)
 
@@ -266,12 +277,12 @@ class ExperienceGenerator[T: Experience]:
                 if requires_logprob:
                     logprob = dist.log_prob(actions).cpu()
 
-                for i in range(self.config["PARALLEL_ENVS"]):
+                for i in range(self.config.collection.experiences.parallelEnvs):
                     if finished[i]:
                         continue
                     state, reward, lines_cleared, game_over, truncated = self.engines[i].step(tetris.Action(actions[i].item()))
 
-                    is_done = game_over or (truncated and self.config["MATRIS_TRUNCATE_HARD_BOUNARY"])
+                    is_done = game_over or (truncated and self.config.tetris.truncate.rewardBoundary)
 
                     reward = torch.tensor(reward)
                     done = torch.tensor(int(is_done))
@@ -300,40 +311,51 @@ class ExperienceGenerator[T: Experience]:
                         buffer.append(trajectories[i])
                         trajectories[i] = Trajectory()
 
+                        self.lines_cleared.append(self.engines[i].lines)
+
                         self.states[i] = self.engines[i].reset()
                         finished[i] = True
                     elif truncated:
                         if not is_done:
-                            self.model(torch.Tensor(state).unsqueeze(0).to(self.model.device))
-                            trajectories[i].set_last_value(self.model.get("state_value"))
+                            with torch.no_grad():
+                                self.model(torch.Tensor(state).unsqueeze(0).to(self.model.device))
+                                trajectories[i].set_last_value(self.model.get("state_value").squeeze())
                         else:
                             trajectories[i].set_last_value(0)
                         buffer.append(trajectories[i])
                         trajectories[i] = Trajectory()
-                        if self.config["BREAK_ON_TRUNCATE"]:
+                        if self.config.tetris.truncate.stopCollection:
                             finished[i] = True
 
                 if all(finished):
                     break
 
-        return buffer
+        if self.config.collection.erm.enabled:
+            self.buffer.join(buffer)
+        else:
+            self.buffer = buffer
+        return self.buffer
 
-class NetworkEpochTrainer[T: Experience]:
-    def __init__(self, config, model: net.Network | list[net.Network] | dict[Any, net.Network], generator: ExperienceGenerator[T], step_func):
+class NetworkEpochTrainer[T: Experience](net.TrainerType):
+    def __init__(self, runner, model: net.Network | list[net.Network] | dict[Any, net.Network], generator: ExperienceGenerator[T], step_func):
         self.model = model
         self.generator = generator
-        self.config = config
+        self.runner = runner
+        self.config: DotDict = runner.config
         self.step_func = step_func
+        self.has_lobprobs = "lobprob" in self.generator.experience_fields
+        self.should_exit = False
+        self.storage = {}
 
         if isinstance(self.model, list):
             self.device = self.model[0].device
-            self.train = lambda: (network.train() for network in self.model)
+            self.train_func = lambda: [network.train() for network in self.model]
         elif isinstance(self.model, dict):
             self.device = next(iter(self.model.values())).device
-            self.train = lambda: (network.train() for network in self.model.values())
+            self.train_func = lambda: [network.train() for network in self.model.values()]
         else:
             self.device = self.model.device
-            self.train = self.model.train
+            self.train_func = self.model.train
 
     def build_dataset(self, progress_bar = None):
         with torch.no_grad():
@@ -341,34 +363,65 @@ class NetworkEpochTrainer[T: Experience]:
 
             dataset = self.generator.experience_type.build_dataset(self.config, buffer)
 
-            loader = torch.utils.data.DataLoader(dataset, batch_size=self.config["BATCH_SIZE"], shuffle=self.config["SHUFFLE_EXPERIENCES"])
+            loader = torch.utils.data.DataLoader(dataset, batch_size=self.config.training.batchSize, shuffle=self.config.training.shuffle)
 
-        if progress_bar:
+        if progress_bar is not None:
             progress_bar.set_postfix({
                 "Gathered Experiences": len(buffer)
             })
 
-        self.train()
+        self.train_func()
         return loader, buffer
 
     def train(self) -> tuple[float, float]:
         epochs_progress = tqdm(
-            range(self.config["EPOCHS"]),
+            range(self.config.training.epoch.epochs) if self.config.training.type == "epoch" else None,
             desc="Epochs",
             dynamic_ncols=True,
             leave=False,
             position=1
         )
 
+        loop_iter = epochs_progress
+        if self.config.training.type == "kl":
+            def up():
+                epochs_progress.update(1)
+                if self.config.training.kl.useEpochLimit and epochs_progress.n > self.config.training.epoch.epochs:
+                    return False
+                if len(self.storage["kl_estimate"]) > 0:
+                    kl_estimate = np.array(self.storage["kl_batch_estimate"]).mean()
+                    epochs_progress.set_postfix({
+                        "Gathered Experiences": len(buffer),
+                        "KL Estimate": kl_estimate
+                    })
+                    return kl_estimate < self.config.training.kl.kl_cutoff
+                return True
+            loop_iter = iter(up, False)
+
+
         loader, buffer = self.build_dataset(epochs_progress)
 
         total_loss = 0
         total_batches = 0
 
-        for _ in epochs_progress:
+        self.storage["kl_estimate"] = []
+        for _ in loop_iter:
+            self.storage["kl_batch_estimate"] = []
             for batch in loader:
                 total_loss += self.step_func(self, tuple(b.to(self.device) for b in batch))
                 total_batches += 1
+                if self.should_exit:
+                    break
+            if len(self.storage["kl_batch_estimate"]) > 0:
+                self.storage["kl_estimate"].append(np.array(self.storage["kl_batch_estimate"]).mean())
+            if self.should_exit:
+                break
+
+        if self.config.training.kl.log and len(self.storage["kl_estimate"]) > 0:
+            self.runner.log_to_list("kl_estimate", self.storage["kl_estimate"])
+
+        if hasattr(self.generator.experience_type, "post_train"):
+            self.generator.experience_type.post_train(self)
 
         return float(total_loss), float(total_batches)
 
@@ -392,7 +445,8 @@ class NetworkLossTrainer[T: Experience](NetworkEpochTrainer[T]):
             batches = 0
 
             for batch in loader:
-                total_loss += self.step_func(self, tuple(b.to(self.device) for b in batch))
+                self.step_func(self, tuple(b.to(self.device) for b in batch))
+                total_loss += self.storage["total_loss"]
                 batches += 1
             avg_loss = abs(float(total_loss) / float(batches))
 
@@ -401,7 +455,7 @@ class NetworkLossTrainer[T: Experience](NetworkEpochTrainer[T]):
                 min_loss = avg_loss
                 last_update = epochs_progress.n
 
-            if epochs_progress.n - last_update > self.config["EPOCHS"] // 10:
+            if epochs_progress.n - last_update > self.config.training.epoch.epochs // 10:
                 break
 
         return min_loss, last_update

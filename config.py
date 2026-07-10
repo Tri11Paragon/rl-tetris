@@ -3,13 +3,38 @@ import os
 import subprocess
 from pathlib import Path
 
+from typing import Any
 
-class DotDict:
+import config_types
+
+ItemNotFound = object()
+
+class DotDict(config_types.NNConfig):
     def __init__(self, mapping):
         for k, v in mapping.items():
             if isinstance(v, dict):
                 v = DotDict(v)
             setattr(self, k, v)
+
+    def _resolve(self, location: str, parts: list[str]) -> Any:
+        dotdict = self
+        for part in parts:
+            if not hasattr(dotdict, part):
+                raise ValueError(f"Invalid Key: {location}. Failed to resolve {part}")
+            dotdict = getattr(dotdict, part)
+        return dotdict
+
+    def resolve(self, location: str):
+        return self._resolve(location, location.split("."))
+
+    def find(self, item: str):
+        try:
+            return self.resolve(item)
+        except ValueError:
+            return ItemNotFound
+
+    def __getattr__(self, item: str):
+        return self.resolve(item)
 
 
 class Config:
@@ -19,6 +44,10 @@ class Config:
             raise ValueError("NIX_CONFIG_PATH environment variable not set. Please open a nix shell.")
 
         self.file = Path(config_file)
+        if not self.file.exists():
+            with self.file.open("w") as f:
+                f.write("helpers: with helpers; {}")
+                f.flush()
 
         completed = subprocess.run(
             ["nix-instantiate", "--eval", nix_path, "--argstr", "file", f"{self.file.absolute()}", "--show-trace", "--json", "--strict"],
@@ -31,7 +60,15 @@ class Config:
             print(completed.stderr)
             raise RuntimeError("Failed to instantiate Nix expression")
 
-        self.config = json.loads(completed.stdout)
+        nix_data = json.loads(completed.stdout)
+
+        self.config = nix_data["config_data"]
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        with open(script_dir + "/config_types.py", "w") as f:
+            f.write("from dataclasses import dataclass\n")
+            f.write(nix_data["python"])
 
     def load(self) -> DotDict:
         return DotDict(self.config)

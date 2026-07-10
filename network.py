@@ -6,12 +6,13 @@ import torch.nn.functional as F
 import torch
 import pathlib
 
-from typing import Any
+from typing import Any, Protocol
 
+from config import DotDict
 
-def make_conv2d(inc, outc, kernel_size, padding=0):
+def make_conv2d(inc, outc, kernel_size, padding=0, stride=1):
     return nn.Sequential(
-        nn.Conv2d(inc, outc, kernel_size=kernel_size, padding=padding),
+        nn.Conv2d(inc, outc, kernel_size=kernel_size, padding=padding, stride=stride),
         nn.GroupNorm(1, outc),
         nn.ReLU())
 
@@ -133,17 +134,19 @@ class Network(nn.Module):
                     self.cache[branch["output"]] = getattr(self, branch_name)(self.cache[branch["input"]])
                 else:
                     uneval2.append(branch_name)
+            if len(uneval2) == len(unevaluated):
+                raise ValueError(f"Loop without evaluation occurred. Unevaluated Branches: {unevaluated}")
             unevaluated = uneval2
 
         return next(reversed(self.cache.values()))
 
-    def __contains__(self, item):
+    def __contains__(self, item) -> bool:
         return item in self.cache
 
-    def __getitem__(self, item):
+    def __getitem__(self, item) -> torch.Tensor:
         return self.cache[item]
 
-    def get(self, key):
+    def get(self, key) -> torch.Tensor:
         return self.cache[key]
 
     def zero(self):
@@ -154,14 +157,14 @@ class Network(nn.Module):
 
     def save(self, file):
         if file:
-            torch.save(self.state_dict(), file)
             file = pathlib.Path(file)
             tmp_file = file.with_suffix(file.suffix + ".tmp")
             torch.save(self.state_dict(), tmp_file)
             tmp_file.replace(file)
 
             learn_rate_path = file.with_suffix(".lr")
-            json.dump([group["lr"] for group in self.optimizer.param_groups], learn_rate_path.open(mode="w"), indent=4)
+            with learn_rate_path.open(mode="w") as w:
+                json.dump([group["lr"] for group in self.optimizer.param_groups], w, indent=4)
 
     def load(self, file):
         if file is not None and pathlib.Path(file).exists():
@@ -173,6 +176,22 @@ class Network(nn.Module):
                 for i, group in enumerate(learn_rate):
                     self.optimizer.param_groups[i]["lr"] = group
         return self
+
+class TrainerType(Protocol):
+    model: Network | list[Network] | dict[Any, Network]
+    config: DotDict
+    should_exit: bool
+    runner: Any
+    storage: dict[str, Any]
+
+    @staticmethod
+    def kl_approx(old_log_probs, new_log_probs):
+        log_ratio = new_log_probs - old_log_probs
+        approx_kl = ((log_ratio.exp() - 1) - log_ratio).mean()
+        return approx_kl
+
+    def train(self) -> tuple[float, float]:
+        ...
 
 class MultiVariableScheduler:
     def __init__(self, config, model: Network):
@@ -237,9 +256,16 @@ class MultiVariableScheduler:
             self.reset_timers()
             self.config["ENTROPY"] = max(self.config["ENTROPY_MIN"], self.config["ENTROPY"] - self.config["ENTROPY_DECAY_AMOUNT"])
 
-    def get_last_lr(self):
-        return [group.get("lr") for group in self.model.optimizer.param_groups]
+    def get_last_lr(self) -> list[float]:
+        return [group.get("lr", 0.0) for group in self.model.optimizer.param_groups]
 
     def get_average_lr(self):
         lr = self.get_last_lr()
         return sum(lr) / len(lr)
+
+def get_device(div = None, echo=True):
+    if div is None:
+        div = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if echo:
+            print(f"Using device: {div} | HIP: {getattr(torch.version, 'hip', None) or getattr(torch.version, 'cuda', None)}")
+    return div

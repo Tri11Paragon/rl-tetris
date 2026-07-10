@@ -1,4 +1,4 @@
-{name, config}: let
+config: let
     genPython = with builtins; let
         lib = import <nixpkgs/lib>;
         list = {list = []; __functor = self: item: self//{list=self.list++[item];};};
@@ -25,7 +25,7 @@
             className = pascalCase name;
             class = ''
                 @dataclass
-                class ${className}
+                class ${className}:
                 ${builtins.concatStringsSep "\n" attrs}
             '';
 
@@ -38,4 +38,6 @@
                     list;
         in lib.foldr subClasses (list class) attrNames;
     in name: config: builtins.concatStringsSep "\n" (genClasses list name config).list;
+
+    name = "NNConfig";
 in (genPython name config)
