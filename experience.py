@@ -223,7 +223,7 @@ class DQNExperience(Experience):
 class ExperienceGenerator[T: Experience]:
     def __init__(self, config: DotDict, model: net.Network, experience_type: type[T]):
         self.engines: list[tetris.Matris] = []
-        for _ in range(config.collection.experiences.parallelEnvs):
+        for _ in range(config.collection.parallelEnvs):
             self.engines.append(tetris.Matris(config))
         self.model: net.Network = model
         self.config = config
@@ -235,7 +235,7 @@ class ExperienceGenerator[T: Experience]:
         self.lines_cleared = []
 
     def state_storage(self):
-        return np.ndarray((self.config.collection.experiences.parallelEnvs, 2, tetris.MATRIX_HEIGHT, tetris.MATRIX_WIDTH), dtype=np.uint8)
+        return np.ndarray((self.config.collection.parallelEnvs, 2, tetris.MATRIX_HEIGHT, tetris.MATRIX_WIDTH), dtype=np.uint8)
 
     def generate(self):
         self.lines_cleared = []
@@ -250,22 +250,22 @@ class ExperienceGenerator[T: Experience]:
         )
         for i, engine in enumerate(self.engines):
             self.states[i] = engine.current_state()
-        trajectories = [Trajectory() for _ in range(self.config.collection.experiences.parallelEnvs)]
+        trajectories = [Trajectory() for _ in range(self.config.collection.parallelEnvs)]
         run_iter = runs_progress
         if self.config.collection.type == "experiences":
             def nxt():
                 runs_progress.update(1)
-                return not (len(buffer) > self.config.collection.minExperiences)
+                return not (len(buffer) > self.config.collection.experiences)
             run_iter = iter(nxt, False)
         for _ in run_iter:
             episode_progress = tqdm(
-                range(self.config.collection.experiences.maxExperiencesPerTrajectory),
+                range(self.config.collection.maxExperiencesPerTrajectory),
                 desc="Experiences",
                 dynamic_ncols=True,
                 leave=False,
                 position=2
             )
-            finished = [False] * self.config.collection.experiences.parallelEnvs
+            finished = [False] * self.config.collection.parallelEnvs
             for _ in episode_progress:
                 state_tensor = torch.Tensor(self.states).to(self.model.device)
 
@@ -277,7 +277,7 @@ class ExperienceGenerator[T: Experience]:
                 if requires_logprob:
                     logprob = dist.log_prob(actions).cpu()
 
-                for i in range(self.config.collection.experiences.parallelEnvs):
+                for i in range(self.config.collection.parallelEnvs):
                     if finished[i]:
                         continue
                     state, reward, lines_cleared, game_over, truncated = self.engines[i].step(tetris.Action(actions[i].item()))
@@ -345,7 +345,7 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
         self.step_func = step_func
         self.has_lobprobs = "lobprob" in self.generator.experience_fields
         self.should_exit = False
-        self.storage = {}
+        self.storage = defaultdict[str, Any](list)
 
         if isinstance(self.model, list):
             self.device = self.model[0].device
@@ -389,7 +389,7 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
                 if self.config.training.kl.useEpochLimit and epochs_progress.n > self.config.training.epoch.epochs:
                     return False
                 if len(self.storage["kl_estimate"]) > 0:
-                    kl_estimate = np.array(self.storage["kl_batch_estimate"]).mean()
+                    kl_estimate = np.array(self.storage["_kl_batch_estimate"]).mean()
                     epochs_progress.set_postfix({
                         "Gathered Experiences": len(buffer),
                         "KL Estimate": kl_estimate
@@ -404,21 +404,25 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
         total_loss = 0
         total_batches = 0
 
-        self.storage["kl_estimate"] = []
+        self.storage.clear()
         for _ in loop_iter:
-            self.storage["kl_batch_estimate"] = []
             for batch in loader:
                 total_loss += self.step_func(self, tuple(b.to(self.device) for b in batch))
                 total_batches += 1
                 if self.should_exit:
                     break
-            if len(self.storage["kl_batch_estimate"]) > 0:
-                self.storage["kl_estimate"].append(np.array(self.storage["kl_batch_estimate"]).mean())
+            if "_kl_batch_estimate" in self.storage:
+                self.storage["kl_estimate"].append(np.array(self.storage["_kl_batch_estimate"]).mean())
             if self.should_exit:
                 break
 
-        if self.config.training.kl.log and len(self.storage["kl_estimate"]) > 0:
-            self.runner.log_to_list("kl_estimate", self.storage["kl_estimate"])
+        for key, value in self.storage.items():
+            if key.startswith("_"):
+                continue
+            if isinstance(value, list):
+                self.runner.log_to_list(key, np.array(value).mean())
+            else:
+                self.runner.log_to_list(key, value)
 
         if hasattr(self.generator.experience_type, "post_train"):
             self.generator.experience_type.post_train(self)

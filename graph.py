@@ -3,7 +3,7 @@ import torch
 import numpy as np
 
 def plot_episode_action_probabilities_full(episode_tuple, episode_num):
-    episode_tensor, discounted_rewards, np_rewards = episode_tuple
+    episode_tensor, discounted_rewards, with_dones, np_rewards = episode_tuple
 
     episode_tensor = episode_tensor.detach().cpu().numpy()
     action_names = ['NONE', 'RIGHT', 'LEFT', 'DOWN', 'ROTATE', 'HARD_DROP']
@@ -24,7 +24,7 @@ def plot_episode_action_probabilities_full(episode_tuple, episode_num):
 
 
 def plot_episode_action_probabilities(episode_tuple, episode_num):
-    episode_tensor, discounted_rewards, np_rewards = episode_tuple
+    episode_tensor, discounted_rewards, with_dones, np_rewards = episode_tuple
 
     episode_tensor = episode_tensor.detach().cpu().numpy()
     # action_names = ['NONE', 'RIGHT', 'LEFT', 'DOWN', 'ROTATE', 'HARD_DROP']
@@ -61,8 +61,9 @@ def plot_episode_action_probabilities(episode_tuple, episode_num):
 
     return fig
 
-def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.ndarray, np.ndarray], episode_num, gamma=None, rolling_window=None):
-    episode_tensor, discounted_returns, rewards = episode_tuple
+def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.ndarray, np.ndarray, np.ndarray],
+                                        episode_num, gamma=None, rolling_window=None):
+    episode_tensor, discounted_returns, with_dones, rewards = episode_tuple
     if rolling_window is None:
         rolling_window = len(rewards) // 10
     rolling_window = max(1, rolling_window)
@@ -77,6 +78,7 @@ def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.nd
         raise ValueError("Inputs are empty after conversion.")
 
     discounted_returns = discounted_returns[:T]
+    with_dones = with_dones[:T]
     rewards = rewards[:T]
     timesteps = np.arange(T)
 
@@ -85,7 +87,7 @@ def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.nd
     rolling_timesteps = np.arange(rolling_window - 1, T)
 
     # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
 
     # Top plot: Discounted returns
     ax1.plot(timesteps, discounted_returns, color="black", linewidth=2, label="discounted_return")
@@ -94,7 +96,13 @@ def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.nd
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="upper right")
 
-    title = "Discounted Returns"
+
+    ax2.plot(timesteps, with_dones, color="black", linewidth=2, label="discounted_return")
+    ax2.set_ylabel("Discounted Return With Done")
+    ax2.set_xlabel("Timestep")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper right")
+    title = "Discounted Returns With Done"
     if episode_num is not None:
         title += f" - Episode {episode_num}"
     if gamma is not None:
@@ -102,13 +110,13 @@ def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.nd
     ax1.set_title(title)
 
     # Bottom plot: Rewards with rolling average
-    ax2.plot(timesteps, rewards, color="0.5", alpha=0.25, linewidth=2, label="reward")
-    ax2.plot(rolling_timesteps, rolling_avg, color="blue", linewidth=2, label=f"rolling_avg (window={rolling_window})")
-    ax2.set_ylabel("Reward")
-    ax2.set_xlabel("Timestep")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="upper right")
-    ax2.set_title("Rewards with Rolling Average")
+    ax3.plot(timesteps, rewards, color="0.5", alpha=0.25, linewidth=2, label="reward")
+    ax3.plot(rolling_timesteps, rolling_avg, color="blue", linewidth=2, label=f"rolling_avg (window={rolling_window})")
+    ax3.set_ylabel("Reward")
+    ax3.set_xlabel("Timestep")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(loc="upper right")
+    ax3.set_title("Rewards with Rolling Average")
 
     fig.suptitle(f"Rewards and Discounted Returns - Episode {episode_num}" if episode_num is not None else "Rewards and Discounted Returns", y=0.995)
 

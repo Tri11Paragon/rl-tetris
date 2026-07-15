@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import json
 from abc import abstractmethod
 
@@ -17,9 +19,9 @@ def make_conv2d(inc, outc, kernel_size, padding=0, stride=1):
         nn.ReLU())
 
 
-def make_conv1d(inc, outc, kernel_size):
+def make_conv1d(inc, outc, kernel_size, padding = 0, stride = 1):
     return nn.Sequential(
-        nn.Conv1d(inc, outc, kernel_size=kernel_size),
+        nn.Conv1d(inc, outc, kernel_size=kernel_size, padding=padding, stride=stride),
         nn.GroupNorm(1, outc),
         nn.ReLU())
 
@@ -111,7 +113,7 @@ class Network(nn.Module):
         for branch_name, branch in branches.items():
             setattr(self, branch_name, branch)
         self.cache = {}
-        self.optimizer = torch.optim.Adam([
+        self.optimizer = torch.optim.AdamW([
             {
                 "name": branch_name,
                 "params": branch.parameters(),
@@ -131,6 +133,7 @@ class Network(nn.Module):
                 if branch["input"] is None:
                     self.cache[branch["output"]] = getattr(self, branch_name)(x)
                 elif branch["input"] in self.cache:
+                    # print(f"type {branch["input"]} for {self.cache[branch["input"]].shape}")
                     self.cache[branch["output"]] = getattr(self, branch_name)(self.cache[branch["input"]])
                 else:
                     uneval2.append(branch_name)
@@ -182,7 +185,7 @@ class TrainerType(Protocol):
     config: DotDict
     should_exit: bool
     runner: Any
-    storage: dict[str, Any]
+    storage: defaultdict[str, Any]
 
     @staticmethod
     def kl_approx(old_log_probs, new_log_probs):

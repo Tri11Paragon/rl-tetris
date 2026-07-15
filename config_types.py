@@ -15,7 +15,6 @@ class Training:
 	saveInterval: int
 	shuffle: bool
 	type: str
-	useEpochLimit: bool
 
 @dataclass
 class Kl:
@@ -64,7 +63,14 @@ class Edges:
 class EarlyMove:
 	actionsReward: list
 	cutoff: int
+	diminishFactor: float
 	enabled: bool
+	punishment: Punishment
+
+@dataclass
+class Punishment:
+	factor: float
+	punishLateMoves: bool
 
 @dataclass
 class Cyclic:
@@ -95,7 +101,8 @@ class Scheduler:
 
 @dataclass
 class Network:
-	clipEpsilon: float
+	apa: Apa
+	clipping: Clipping
 	dqn: Dqn
 	dropout: float
 	gamma: float
@@ -107,7 +114,6 @@ class Network:
 
 @dataclass
 class Ppo:
-	clipEpsilon: float
 	entropy: float
 	lamda: float
 	minEntropy: float
@@ -138,17 +144,23 @@ class Dqn:
 	temperature: float
 
 @dataclass
-class Collection:
-	erm: Erm
-	experiences: Experiences
-	minExperiences: int
-	runs: int
-	type: str
+class Clipping:
+	actor_epsilon: float
+	critic_epsilon: float
 
 @dataclass
-class Experiences:
+class Apa:
+	entropy: float
+	lamda: int
+
+@dataclass
+class Collection:
+	erm: Erm
+	experiences: int
 	maxExperiencesPerTrajectory: int
 	parallelEnvs: int
+	runs: int
+	type: str
 
 @dataclass
 class Erm:

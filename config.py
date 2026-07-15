@@ -58,7 +58,7 @@ class Config:
 
         if completed.returncode != 0:
             print(completed.stderr)
-            raise RuntimeError("Failed to instantiate Nix expression")
+            exit(1)
 
         nix_data = json.loads(completed.stdout)
 

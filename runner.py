@@ -6,6 +6,7 @@ import random
 from matplotlib import pyplot as plt
 
 import MaTris.matris
+import apa
 import dqn
 import experience
 import graph
@@ -115,6 +116,8 @@ class Runner:
     def tetris_network(self, name = "network", ttype = "ppo"):
         if ttype == "ppo":
             return self.object(name, ppo.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
+        elif ttype == "apa":
+            return self.object(name, ppo.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
         elif ttype == "dqn":
             return self.object(name, dqn.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
         else:
@@ -157,6 +160,7 @@ def test(args):
     game.main(screen, engine)
     game.extra_text.append(f"Training Type: {runner.config.network.type}")
     game.extra_text.append(f"Steps: {runner.run_data["runs"]}")
+    game.extra_text.append(f"Timer: {0}")
 
     state = engine.reset()
     network.eval()
@@ -167,6 +171,9 @@ def test(args):
     episodes = []
     probs = []
     returns = []
+    dones = []
+
+    timer = 0
 
     from experience import Trajectory
     trajectory = Trajectory()
@@ -206,6 +213,13 @@ def test(args):
                 visualizer.update(state, logits.squeeze().cpu(), dist.probs.squeeze().cpu(),
                                   network["state_value"].item() if "state_value" in network else 0, action)
 
+            if pygame.K_PLUS in game.extra_keys or pygame.K_KP_PLUS in game.extra_keys:
+                timer += 0.01
+
+            if pygame.K_MINUS in game.extra_keys or pygame.K_KP_MINUS in game.extra_keys:
+                timer -= 0.01
+            game.extra_text[2] = f"Timer: {timer:.2f}"
+
             if best and not run:
                 actions.extend(engine.best_action_set())
 
@@ -215,6 +229,7 @@ def test(args):
                 continue
 
             for action in actions:
+                time.sleep(timer)
                 state_tensor = torch.Tensor(state).unsqueeze(0).to(network.device)
                 network(state_tensor)
                 logits = network["action_logits"]
@@ -229,8 +244,8 @@ def test(args):
                 game.redraw()
                 state = next_state
 
-                reward = torch.tensor([reward]).to(network.device)
-                done = torch.tensor([int(game_over or truncated)]).to(network.device)
+                # reward = torch.tensor([reward]).to(network.device)
+                dones.append(int(game_over or truncated))
 
                 # trajectory.append(PPOExperience(
                 #     state_tensor.detach(), action, reward, done, dist.log_prob(torch.tensor(action.value).to(network.device)), network.critic()))
@@ -239,12 +254,14 @@ def test(args):
                     state = engine.reset()
                     np_rewards = np.array(returns)
 
-                    discounted_rewards = np_rewards.copy()
+                    discounted_rewards = np.zeros(np_rewards.shape)
+                    with_dones = np.zeros(np_rewards.shape)
                     for i in reversed(range(len(returns) - 1)):
                         discounted_rewards[i] = discounted_rewards[i + 1] * runner.config.network.gamma + np_rewards[i]
+                        with_dones[i] = (1 - dones[i]) * with_dones[i + 1] * runner.config.network.gamma + np_rewards[i]
 
                     if len(probs) > 0:
-                        episodes.append( (torch.stack(probs), discounted_rewards, np_rewards) )
+                        episodes.append( (torch.stack(probs), discounted_rewards, with_dones, np_rewards) )
                         probs.clear()
                     returns.clear()
                     if "state_value" in network:
@@ -288,6 +305,10 @@ def train(args):
     if network_type == "ppo":
         experience_type = PPOExperience
         step_function = ppo.step
+        networks = network
+    elif network_type == "apa":
+        experience_type = PPOExperience
+        step_function = apa.step
         networks = network
     elif network_type == "dqn":
         experience_type = DQNExperience

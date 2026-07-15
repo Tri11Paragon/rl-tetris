@@ -1,6 +1,6 @@
 helpers: with helpers; {
     network = {
-        # 'ppo' or 'dqn'
+        # 'ppo', 'dqn' or 'apa'
         type = "ppo";
         init_lr = {
             convLearnRate = e- 5;
@@ -14,11 +14,20 @@ helpers: with helpers; {
         };
         dropout = 0.2;
         gamma = 0.9;
+        clipping = {
+            actor_epsilon = 0.2;
+            critic_epsilon = 0.1;
+        };
+        apa = {
+            # Temperature control parameter used for APA learning.
+            # ppo lambda still controls the GAE estimate!
+            lamda = 1;
+            entropy = 0.1;
+        };
         ppo = {
             lamda = 0.1;
             entropy = 0.1;
             minEntropy = 0.001;
-            clipEpsilon = 0.2;
         };
         dqn = {
             temperature = 1.1;
@@ -36,7 +45,7 @@ helpers: with helpers; {
         type = "kl";
         batchSize = 64;
         saveInterval = 5;
-        shuffle = false;
+        shuffle = true;
         epoch = {
             epochs = 10;
         };
@@ -49,17 +58,16 @@ helpers: with helpers; {
     collection = {
         # either 'runs' or 'experiences'
         type = "experiences";
-        experiences = {
-            parallelEnvs = 1;
-            maxExperiencesPerTrajectory = 100;
-        };
+        runs = 100;
+        experiences = 2000;
+
+        parallelEnvs = 1;
+        maxExperiencesPerTrajectory = 100;
         erm = {
             enabled = false;
             minTrajectories = 10;
             length = 10000;
         };
-        runs = 100;
-        minExperiences = 2000;
     };
     scheduler = {
         decay = [
@@ -105,6 +113,7 @@ helpers: with helpers; {
             };
             earlyMove = {
                 enabled = true;
+                diminishFactor = 0.75;
                 # if an action isn't in this it doesn't reward
                 actionsReward = [
                     {name = "LEFT"; reward = 0.5;}
@@ -112,6 +121,11 @@ helpers: with helpers; {
                     {name = "ROTATE"; reward = 0.1;}
                 ];
                 cutoff = 0;
+                # Any move in actionsReward's reward becomes -reward * factor if it occurs beyond the cutoff.
+                punishment = {
+                    punishLateMoves = false;
+                    factor = 1.0;
+                };
             };
         };
     };

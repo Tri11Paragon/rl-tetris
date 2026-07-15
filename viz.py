@@ -24,6 +24,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--location", '-l', type=str, default="experiments")
     parser.add_argument("file")
+    parser.add_argument("type", choices=["lines", "loss", "all"])
     args = parser.parse_args()
 
     rolling_window = 50
@@ -33,10 +34,19 @@ def main():
     with open(str(Path(args.location) / args.file / "state.json"), "r") as f:
         data = json.load(f)
 
-    def build_loss(window: int):
-        return [(name, value, rolling_average(value, window)) for name, value in data.items() if type(value) == list]
+    filtered_data = {name: value for name, value in data.items() if type(value) == list}
 
-    averaged_loss_profiles = build_loss(rolling_window)
+    print("Options:")
+    for key in filtered_data.keys():
+        print(f"\t{key}")
+    print()
+
+    if args.type == "all":
+        averaged_loss_profiles = [(name, value, rolling_average(value, rolling_window)) for name, value in filtered_data.items()]
+    elif args.type == "loss":
+        averaged_loss_profiles = [(name, value, rolling_average(value, rolling_window)) for name, value in filtered_data.items() if "_loss" in name]
+    elif args.type == "lines":
+        averaged_loss_profiles = [(name, value, rolling_average(value, rolling_window)) for name, value in filtered_data.items() if "lines" in name]
 
     fig, axes = plt.subplots(
         len(averaged_loss_profiles),

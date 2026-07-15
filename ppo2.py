@@ -67,18 +67,22 @@ def step(self: net.TrainerType , batch: tuple) -> float:
     # PPO Surrogate Objective
     importance_ratio = torch.exp(action_logprob - b_logprob)
     surrogate = importance_ratio * b_advantages
-    clipped_surrogate = torch.clamp(importance_ratio, 1 - self.config.network.ppo.clipEpsilon,
-                                    1 + self.config.network.ppo.clipEpsilon) * b_advantages
+    clipped_surrogate = torch.clamp(importance_ratio, 1 - self.config.network.clipping.actor_epsilon,
+                                    1 + self.config.network.clipping.actor_epsilon) * b_advantages
 
-    actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.config.network.ppo.entropy * entropy)
-    critic_loss = torch.nn.functional.mse_loss(state_values, b_returns)
-    total_loss = (actor_loss + (critic_loss * 0.5) * 0.01).mean()
+    actor_loss = -(torch.min(surrogate, clipped_surrogate) + self.config.network.ppo.entropy * entropy).mean()
+    critic_loss = torch.nn.functional.huber_loss(state_values, b_returns).mean()
+    total_loss = (actor_loss + (critic_loss * 0.5) * 0.01)
 
-    self.storage["kl_batch_estimate"].append(self.kl_approx(b_logprob, action_logprob).mean().item())
+    self.storage["_kl_batch_estimate"].append(self.kl_approx(b_logprob, action_logprob).mean().item())
+    self.storage["actor_loss"].append(actor_loss.item())
+    self.storage["critic_loss"].append(critic_loss.item())
+    self.storage["total_loss"].append(total_loss.item())
+    self.storage["advantages"].append(b_advantages.mean().item())
     # self.runner.log_to_list("kl_estimate", kl_estimate)
 
     self.model.zero()
-    total_loss.mean().backward()
+    total_loss.backward()
     self.model.step()
 
     return total_loss.item()
