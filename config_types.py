@@ -115,7 +115,7 @@ class Network:
 @dataclass
 class Ppo:
 	entropy: float
-	lamda: float
+	lamda: int
 	minEntropy: float
 
 @dataclass
@@ -151,7 +151,7 @@ class Clipping:
 @dataclass
 class Apa:
 	entropy: float
-	lamda: int
+	lamda: float
 
 @dataclass
 class Collection:

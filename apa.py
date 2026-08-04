@@ -6,7 +6,7 @@ import torch
 
 global_steps = 0
 
-def step(self: net.TrainerType , batch: tuple) -> float:
+def step(self: net.TrainerType , batch: tuple):
     b_state, b_action, b_logprob, b_advantages, b_returns = batch
 
     assert(isinstance(self.model, net.Network))
@@ -27,7 +27,7 @@ def step(self: net.TrainerType , batch: tuple) -> float:
 
     entropy_loss = -entropy * self.config.network.apa.entropy
 
-    loss = loss_apa + loss_v * 0.028 + entropy_loss
+    loss = loss_apa + loss_v + entropy_loss
 
     self.storage["_kl_batch_estimate"].append(self.kl_approx(b_logprob, action_logprob).mean().item())
     self.storage["actor_loss"].append(loss_apa.item())
@@ -38,5 +38,3 @@ def step(self: net.TrainerType , batch: tuple) -> float:
     self.model.zero()
     loss.backward()
     self.model.step()
-
-    return loss.item()

@@ -49,7 +49,7 @@ def AdjustedSandfordNetwork(config: DotDict, device = None):
     )
 
 
-def step(self: net.TrainerType , batch: tuple) -> float:
+def step(self: net.TrainerType , batch: tuple):
     b_state, b_action, b_logprob, b_advantages, b_returns = batch
 
     assert(isinstance(self.model, net.Network))
@@ -84,8 +84,6 @@ def step(self: net.TrainerType , batch: tuple) -> float:
     self.model.zero()
     total_loss.backward()
     self.model.step()
-
-    return total_loss.item()
 
 
 class NetworkRealtimeVisualizer:
@@ -151,7 +149,7 @@ class NetworkRealtimeVisualizer:
             y = y0 + i * (bar_height + gap)
 
             bg_rect = pygame.Rect(x0, y, bar_width, bar_height)
-            prob_rect = pygame.Rect(x0, y, int(bar_width * float(prob)), bar_height)
+            prob_rect = pygame.Rect(x0, y, int(bar_width * float(prob.detach())), bar_height)
 
             self.fill_rect(bg_rect, (55, 55, 65, 255))
             self.fill_rect(prob_rect, (80, 180, 255, 255))

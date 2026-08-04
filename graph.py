@@ -2,20 +2,17 @@ import matplotlib.pyplot as plt
 import torch
 import numpy as np
 
-def plot_episode_action_probabilities_full(episode_tuple, episode_num):
-    episode_tensor, discounted_rewards, with_dones, np_rewards = episode_tuple
-
-    episode_tensor = episode_tensor.detach().cpu().numpy()
+def plot_episode_action_probabilities_full(logits: torch.Tensor):
     action_names = ['NONE', 'RIGHT', 'LEFT', 'DOWN', 'ROTATE', 'HARD_DROP']
-    timesteps = np.arange(episode_tensor.shape[0])
+    timesteps = np.arange(logits.shape[0])
 
     fig = plt.figure(figsize=(12, 6))
-    for action_idx in range(episode_tensor.shape[1]):
-        plt.plot(timesteps, episode_tensor[:, action_idx], label=action_names[action_idx], marker='o', markersize=3)
+    for action_idx in range(logits.shape[1]):
+        plt.plot(timesteps, logits[:, action_idx], label=action_names[action_idx], marker='o', markersize=3)
 
     plt.xlabel('Timestep in Episode')
     plt.ylabel('Probability')
-    plt.title(f'Action Probabilities Over Time - Episode {episode_num}')
+    plt.title(f'Action Probabilities Over Time')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -23,30 +20,26 @@ def plot_episode_action_probabilities_full(episode_tuple, episode_num):
     return fig
 
 
-def plot_episode_action_probabilities(episode_tuple, episode_num):
-    episode_tensor, discounted_rewards, with_dones, np_rewards = episode_tuple
-
-    episode_tensor = episode_tensor.detach().cpu().numpy()
-    # action_names = ['NONE', 'RIGHT', 'LEFT', 'DOWN', 'ROTATE', 'HARD_DROP']
+def plot_episode_action_probabilities(logits: torch.Tensor, returns: torch.Tensor):
     action_names = ['RIGHT', 'LEFT', 'DOWN', 'ROTATE', 'HARD_DROP']
-    timesteps = np.arange(episode_tensor.shape[0])
-    timesteps_dr = np.arange(discounted_rewards.shape[0])
+    timesteps = np.arange(logits.shape[0])
+    timesteps_dr = np.arange(returns.shape[0])
 
-    fig, axes = plt.subplots(episode_tensor.shape[1], 1, figsize=(12, 10), sharex=True)
+    fig, axes = plt.subplots(logits.shape[1], 1, figsize=(12, 10), sharex=True)
 
-    for action_idx in range(episode_tensor.shape[1]):
+    for action_idx in range(logits.shape[1]):
         ax = axes[action_idx]
 
-        ax.plot(timesteps, episode_tensor[:, action_idx],
+        ax.plot(timesteps, logits[:, action_idx],
                               label=action_names[action_idx], linewidth=2, color='C' + str(action_idx))
-        ax.fill_between(timesteps, episode_tensor[:, action_idx], alpha=0.3, color='C' + str(action_idx))
+        ax.fill_between(timesteps, logits[:, action_idx], alpha=0.3, color='C' + str(action_idx))
         ax.set_ylabel('Probability')
         ax.set_ylim(0, 1)
         ax.grid(True, alpha=0.3)
 
         ax_r = ax.twinx()
 
-        ax_r.plot(timesteps_dr, discounted_rewards, color='black', alpha=0.5, linewidth=2, label='Discounted Return', zorder=5)
+        ax_r.plot(timesteps_dr, returns, color='black', alpha=0.5, linewidth=2, label='Discounted Return', zorder=5)
 
         ax_r.set_ylabel('Reward')
         ax_r.grid(False)
@@ -56,69 +49,51 @@ def plot_episode_action_probabilities(episode_tuple, episode_num):
         ax.legend(h1 + h2, l1 + l2, loc='upper right')
 
     axes[-1].set_xlabel('Timestep in Episode')
-    fig.suptitle(f'Action Probabilities Over Time - Episode {episode_num}', fontsize=14, y=0.995)
+    fig.suptitle(f'Action Probabilities Over Time', fontsize=14, y=0.995)
     plt.tight_layout()
 
     return fig
 
-def plot_rewards_and_discounted_returns(episode_tuple: tuple[torch.Tensor, np.ndarray, np.ndarray, np.ndarray],
-                                        episode_num, gamma=None, rolling_window=None):
-    episode_tensor, discounted_returns, with_dones, rewards = episode_tuple
-    if rolling_window is None:
-        rolling_window = len(rewards) // 10
-    rolling_window = max(1, rolling_window)
-
-    if discounted_returns.ndim != 1 or rewards.ndim != 1:
-        raise ValueError(
-            f"Expected 1D inputs. Got discounted_returns shape={discounted_returns.shape}, rewards shape={rewards.shape}"
-        )
-
-    T = min(len(discounted_returns), len(rewards))
+def plot_rewards_and_discounted_returns(returns: torch.Tensor, advantages: torch.Tensor, rewards: torch.Tensor, gamma=None):
+    T = min(returns.shape[0], rewards.shape[0], advantages.shape[0])
     if T == 0:
         raise ValueError("Inputs are empty after conversion.")
 
-    discounted_returns = discounted_returns[:T]
-    with_dones = with_dones[:T]
     rewards = rewards[:T]
+    returns = returns[:T]
+    advantages = advantages[:T]
     timesteps = np.arange(T)
 
-    # Calculate rolling average for rewards
-    rolling_avg = np.convolve(rewards, np.ones(rolling_window) / rolling_window, mode='valid')
-    rolling_timesteps = np.arange(rolling_window - 1, T)
-
     # Create figure with two subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
+    fig, (ax2, ax3, ax1) = plt.subplots(3, 1, figsize=(12, 10))
 
     # Top plot: Discounted returns
-    ax1.plot(timesteps, discounted_returns, color="black", linewidth=2, label="discounted_return")
-    ax1.set_ylabel("Discounted Return")
-    ax1.set_xlabel("Timestep")
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="upper right")
-
-
-    ax2.plot(timesteps, with_dones, color="black", linewidth=2, label="discounted_return")
-    ax2.set_ylabel("Discounted Return With Done")
+    ax2.plot(timesteps, returns, color="black", linewidth=2, label="Discounted Return")
+    ax2.set_ylabel("Discounted Return")
     ax2.set_xlabel("Timestep")
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc="upper right")
-    title = "Discounted Returns With Done"
-    if episode_num is not None:
-        title += f" - Episode {episode_num}"
+    title = "Discounted Return"
     if gamma is not None:
         title += f" (gamma={gamma})"
-    ax1.set_title(title)
+    ax2.set_title(title)
 
     # Bottom plot: Rewards with rolling average
-    ax3.plot(timesteps, rewards, color="0.5", alpha=0.25, linewidth=2, label="reward")
-    ax3.plot(rolling_timesteps, rolling_avg, color="blue", linewidth=2, label=f"rolling_avg (window={rolling_window})")
+    ax3.plot(timesteps, returns, color="black", linewidth=2, label="Discounted Return")
+    ax3.plot(timesteps, rewards, color="blue", alpha=0.5, linewidth=1, label="Reward")
+    # ax3.plot(rolling_timesteps, rolling_avg, color="blue", linewidth=2, label=f"rolling_avg (window={rolling_window})")
     ax3.set_ylabel("Reward")
     ax3.set_xlabel("Timestep")
     ax3.grid(True, alpha=0.3)
     ax3.legend(loc="upper right")
-    ax3.set_title("Rewards with Rolling Average")
+    ax3.set_title("Discounted Return with Rewards")
 
-    fig.suptitle(f"Rewards and Discounted Returns - Episode {episode_num}" if episode_num is not None else "Rewards and Discounted Returns", y=0.995)
+    ax1.plot(timesteps, advantages, color="black", linewidth=2, label="Advantage")
+    ax1.plot(timesteps, rewards, color="blue", alpha=0.5, linewidth=1, label="Reward")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper right")
+
+    fig.suptitle("Rewards and Discounted Return", y=0.995)
 
     plt.tight_layout()
 

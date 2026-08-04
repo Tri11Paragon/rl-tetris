@@ -24,7 +24,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--location", '-l', type=str, default="experiments")
     parser.add_argument("file")
-    parser.add_argument("type", choices=["lines", "loss", "all"])
+    parser.add_argument("type",
+                        nargs="?",
+                        default=None,
+                        help="Run command to see a list of options, use + to combine multiple options into a single graph")
     args = parser.parse_args()
 
     rolling_window = 50
@@ -41,12 +44,32 @@ def main():
         print(f"\t{key}")
     print()
 
-    if args.type == "all":
-        averaged_loss_profiles = [(name, value, rolling_average(value, rolling_window)) for name, value in filtered_data.items()]
-    elif args.type == "loss":
-        averaged_loss_profiles = [(name, value, rolling_average(value, rolling_window)) for name, value in filtered_data.items() if "_loss" in name]
-    elif args.type == "lines":
-        averaged_loss_profiles = [(name, value, rolling_average(value, rolling_window)) for name, value in filtered_data.items() if "lines" in name]
+    expansions = {
+        "loss": [data for data in filtered_data.keys() if "_loss" in data],
+        "all": [data for data in filtered_data.keys()]
+    }
+
+    print("Expansions:")
+    for key, values in expansions.items():
+        print(f"\t{key}: [{', '.join(values)}]")
+    print()
+
+    if args.type is None:
+        return
+
+    parts = args.type.split("+")
+    parts = [part.strip() for part in parts]
+    parts = [
+        inner
+        for part in parts
+        for inner in (expansions[part] if (part in expansions) else [part])
+    ]
+    parts = list(dict.fromkeys(parts))
+    print("Using: ", parts)
+
+    averaged_loss_profiles = []
+    for part in parts:
+        averaged_loss_profiles += [(name, value, rolling_average(value, rolling_window)) for name, value in filtered_data.items() if part in name]
 
     fig, axes = plt.subplots(
         len(averaged_loss_profiles),

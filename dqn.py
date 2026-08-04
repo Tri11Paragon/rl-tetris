@@ -47,7 +47,7 @@ def AdjustedSandfordNetwork(config: DotDict, device = None):
     )
 
 
-def step(self: net.TrainerType , batch: tuple) -> float:
+def step(self: net.TrainerType , batch: tuple):
     b_state, b_action, b_reward, b_next_state, b_done = batch
 
     b_reward = b_reward.unsqueeze(1)
@@ -75,5 +75,3 @@ def step(self: net.TrainerType , batch: tuple) -> float:
     loss = criterion(state_values, predicted_values)
     loss.mean().backward()
     model.step()
-
-    return loss.item()

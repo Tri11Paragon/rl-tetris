@@ -193,7 +193,7 @@ class TrainerType(Protocol):
         approx_kl = ((log_ratio.exp() - 1) - log_ratio).mean()
         return approx_kl
 
-    def train(self) -> tuple[float, float]:
+    def train(self) -> float:
         ...
 
 class MultiVariableScheduler:

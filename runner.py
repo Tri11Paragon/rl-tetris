@@ -33,6 +33,10 @@ subparsers = parser.add_subparsers(dest="command")
 parser.add_argument("-l", "--location", type=str, default="experiments")
 parser.add_argument("-s", "--seed", type=int, default=0)
 
+parser_evaler = subparsers.add_parser("eval")
+parser_evaler.add_argument("file", type=str)
+parser_evaler.add_argument("--runs", type=int, default=100)
+
 parser_tester = subparsers.add_parser("test")
 parser_tester.add_argument("file", type=str)
 
@@ -46,7 +50,7 @@ parser_initializer.add_argument("file", type=str)
 class Runner:
     def __init__(self, file, location="experiments"):
         self.file = file
-        self.location = location
+        self._location = location
         self.folder = Path(location) / file
         self.config_path = self.folder / "config.nix"
         self.object_storage = {}
@@ -55,6 +59,11 @@ class Runner:
             "time": 0
         })
         self.init_run()
+
+    def make_folder(self, folder_name: str):
+        f = self.folder / folder_name / time.strftime("%Y-%m-%d_%H-%M-%S")
+        f.mkdir(parents=True, exist_ok=True)
+        return f
 
     def __getitem__(self, item):
         return self.object_storage[item]
@@ -123,28 +132,6 @@ class Runner:
         else:
             raise TypeError(f"Invalid type '{ttype}'")
 
-def evaluate_network(config: DotDict, network) -> tuple[float, float, int]:
-    with torch.no_grad():
-        engine = tetris.Matris(config)
-        state = engine.current_state()
-        returns = []
-        while True:
-            state_tensor = torch.Tensor(state).unsqueeze(0).to(network.device)
-            network(state_tensor)
-            action = torch.argmax(network["action_logits"]).item()
-            state, reward, lines_cleared, game_over, truncated = engine.step(action)
-            returns.append(reward)
-
-            if game_over:
-                break
-        discounted_returns = []
-        accum = 0
-        for ret in reversed(returns):
-            accum = accum * config.network.gamma + ret
-            discounted_returns.append(accum)
-        return float(np.array(returns).mean()), float(np.array(discounted_returns).mean()), engine.lines
-
-
 
 def test(args):
     runner = Runner(args.file, args.location)
@@ -159,7 +146,7 @@ def test(args):
     game = tetris.Game()
     game.main(screen, engine)
     game.extra_text.append(f"Training Type: {runner.config.network.type}")
-    game.extra_text.append(f"Steps: {runner.run_data["runs"]}")
+    game.extra_text.append(f"Steps: {runner.run_data['runs']}")
     game.extra_text.append(f"Timer: {0}")
 
     state = engine.reset()
@@ -168,15 +155,11 @@ def test(args):
     run = False
     best = False
 
-    episodes = []
-    probs = []
-    returns = []
-    dones = []
-
     timer = 0
 
     from experience import Trajectory
     trajectory = Trajectory()
+
     try:
         while True:
             try:
@@ -207,17 +190,17 @@ def test(args):
                 dist = torch.distributions.Categorical(logits=logits)
                 # action = dist.sample().item()
                 action = torch.argmax(logits).item()
-                probs.append(dist.probs.squeeze())
                 actions.append(tetris.Action(action))
 
                 visualizer.update(state, logits.squeeze().cpu(), dist.probs.squeeze().cpu(),
                                   network["state_value"].item() if "state_value" in network else 0, action)
 
-            if pygame.K_PLUS in game.extra_keys or pygame.K_KP_PLUS in game.extra_keys:
+            if pygame.K_EQUALS in game.extra_keys or pygame.K_KP_PLUS in game.extra_keys:
                 timer += 0.01
 
             if pygame.K_MINUS in game.extra_keys or pygame.K_KP_MINUS in game.extra_keys:
                 timer -= 0.01
+            timer = max(0, timer)
             game.extra_text[2] = f"Timer: {timer:.2f}"
 
             if best and not run:
@@ -236,66 +219,89 @@ def test(args):
                 dist = torch.distributions.Categorical(logits=logits)
 
                 if "state_value" in network:
-                    print(f"Critic says state is: {network["state_value"].item()} | ", end='')
+                    print(f"Critic says state is: {network['state_value'].item()} | ", end='')
                 next_state, reward, lines_cleared, game_over, truncated = engine.step(action)
 
                 print(f"Reward was: {reward}")
-                returns.append(reward)
                 game.redraw()
                 state = next_state
 
-                # reward = torch.tensor([reward]).to(network.device)
-                dones.append(int(game_over or truncated))
+                is_done = int(game_over or (truncated and runner.config.tetris.truncate.rewardBoundary))
 
-                # trajectory.append(PPOExperience(
-                #     state_tensor.detach(), action, reward, done, dist.log_prob(torch.tensor(action.value).to(network.device)), network.critic()))
+                data_dict = {
+                    "state": state_tensor.detach().cpu().squeeze(),
+                    "action": torch.tensor(action.value),
+                    "reward": torch.tensor(reward),
+                    "done": torch.tensor(is_done),
+                    "logprob": dist.log_prob(torch.tensor(action.value).to(network.device)),
+                    "logits": logits.detach().cpu().squeeze(),
+                }
+
+                if "state_value" in network:
+                    data_dict["state_value"] = network.get("state_value").detach().cpu().squeeze()
+
+                trajectory.append(data_dict)
 
                 if game_over:
-                    state = engine.reset()
-                    np_rewards = np.array(returns)
-
-                    discounted_rewards = np.zeros(np_rewards.shape)
-                    with_dones = np.zeros(np_rewards.shape)
-                    for i in reversed(range(len(returns) - 1)):
-                        discounted_rewards[i] = discounted_rewards[i + 1] * runner.config.network.gamma + np_rewards[i]
-                        with_dones[i] = (1 - dones[i]) * with_dones[i + 1] * runner.config.network.gamma + np_rewards[i]
-
-                    if len(probs) > 0:
-                        episodes.append( (torch.stack(probs), discounted_rewards, with_dones, np_rewards) )
-                        probs.clear()
-                    returns.clear()
                     if "state_value" in network:
                         trajectory.set_last_value(network["state_value"])
                     raise SystemExit("Game Over")
     except (SystemExit, KeyboardInterrupt, MaTris.matris.GameOver):
-        location = Path(runner.location) / runner.file / "runs"/ time.strftime("%Y-%m-%d_%H-%M-%S")
-        location.mkdir(parents=True, exist_ok=True)
+        location = runner.make_folder("runs")
         pygame.image.save(screen, location / f"episode.png")
 
-        for i, episode in enumerate(episodes):
-            episode_action_probs = graph.plot_episode_action_probabilities_full(episode, i)
-            episode_action_probs.savefig(location / f"episode_{i}_action_probs.png")
-            plt.close(episode_action_probs)
-            episode_action_probs = graph.plot_episode_action_probabilities(episode, i)
-            episode_action_probs.savefig(location / f"episode_{i}_action_probs_seperate.png")
-            plt.close(episode_action_probs)
-            discounted_returns = graph.plot_rewards_and_discounted_returns(episode, i, runner.config.network.gamma)
-            discounted_returns.savefig(location / f"episode_{i}_discounted_returns.png")
-            plt.close(discounted_returns)
+        trajectory.set_last_value(0)
+        advantages, returns = trajectory.compute_gae(runner.config.network.gamma, runner.config.network.ppo.lamda)
+        returns = returns.detach()
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = advantages.detach()
 
-        # gae, returns = trajectory.compute_gae(runner.config.network.gamma, runner.config.network.ppo.lamda)
-        # gae_returns = graph.plot_gae_and_returns(
-        #     gae,
-        #     returns,
-        #     gamma=runner.config.network.gamma,
-        #     lamda=runner.config.network.ppo.lamda
-        # )
-        # terminals = trajectory.get_terminals()
-        # for term in terminals:
-        #     gae_returns.axes[0].axvline(term, color="red", linestyle="--", linewidth=0.8, alpha=0.7)
-        #     gae_returns.axes[1].axvline(term, color="red", linestyle="--", linewidth=0.8, alpha=0.7)
-        # gae_returns.savefig(location / "episode_gae_returns.png")
-        # plt.close(gae_returns)
+        logits = torch.stack(trajectory["logits"])
+        rewards = torch.stack(trajectory["reward"])
+
+        episode_action_probs = graph.plot_episode_action_probabilities_full(logits)
+        episode_action_probs.savefig(location / f"episode_action_probs.png")
+        plt.close(episode_action_probs)
+        episode_action_probs = graph.plot_episode_action_probabilities(logits, returns)
+        episode_action_probs.savefig(location / f"episode_action_probs_seperate.png")
+        plt.close(episode_action_probs)
+        discounted_returns = graph.plot_rewards_and_discounted_returns(returns, advantages, rewards, runner.config.network.gamma)
+        discounted_returns.savefig(location / f"episode_discounted_returns.png")
+        plt.close(discounted_returns)
+
+def _eval(args):
+    runner = Runner(args.file, args.location)
+    network = runner.tetris_network(ttype=runner.config.network.type.lower())
+    engines = [runner.tetris_engine(str(name)) for name in range(args.runs)]
+    states = np.array([engine.current_state() for engine in engines])
+    finished = [False] * len(engines)
+
+    while True:
+        state_tensor = torch.Tensor(states).to(network.device)
+        network(state_tensor)
+        actions = torch.argmax(network["action_logits"], dim=1).numpy(force=True)
+        for i, (engine, action) in enumerate(zip(engines, actions)):
+            if finished[i]:
+                continue
+            state, reward, lines_cleared, game_over, truncated = engine.step(MaTris.matris.Action(action))
+            states[i] = state
+            if game_over:
+                finished[i] = True
+        if all(finished):
+            break
+
+    lines = np.array([engine.lines for engine in engines])
+    score = np.array([engine.score for engine in engines])
+
+    mean_lines = lines.mean()
+    mean_score = score.mean()
+
+    print(f"Average Lines: {mean_lines}")
+    print(f"Average Score: {mean_score}")
+
+    folder = runner.make_folder("evals")
+    with open(f"{folder / 'results.json'}", "w+") as f:
+        json.dump({"lines": mean_lines, "score": mean_score}, f)
 
 def train(args):
     runner = Runner(args.file, args.location)
@@ -331,17 +337,16 @@ def train(args):
 
         while True:
             start = time.time()
-            total_loss, total_batches = trainer.train()
-            runner.run_data["loss"].append(total_loss / total_batches)
-            traj_returns = generator.buffer.compute_returns(runner.config.network.gamma)[0]
+            _ = trainer.train()
+            traj_returns = generator.buffer.compute_returns(runner.config.network.gamma)
             runner.run_data["average_trajectory_return"].append(float(traj_returns.mean()))
             lines_cleared = np.array(generator.lines_cleared)
             runner.run_data["average_lines_cleared"].append(float(lines_cleared.mean()) if len(generator.lines_cleared) > 0 else 0)
             runner.increment_runs()
             progress.update(1)
-            progress.set_postfix({
-                "Loss": f"{float(total_loss / total_batches):.6f}"
-            })
+            # progress.set_postfix({
+            #     "Loss": f"{float(total_loss / total_batches):.6f}"
+            # })
             end = time.time()
             runner.run_data["time"] += end - start
 
@@ -369,6 +374,8 @@ def main():
         test(args)
     elif args.command == "train":
         train(args)
+    elif args.command == "eval":
+        _eval(args)
     elif args.command == "init":
         runner = Runner(args.file, args.location)
         runner.init_run()

@@ -59,7 +59,7 @@ helpers: with helpers; {
         # either 'runs' or 'experiences'
         type = "experiences";
         runs = 100;
-        experiences = 2000;
+        experiences = 2048;
 
         parallelEnvs = 1;
         maxExperiencesPerTrajectory = 100;

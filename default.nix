@@ -14,6 +14,8 @@ let
       python-pkgs.tqdm
       python-pkgs.opencv4
       python-pkgs.openai
+      python-pkgs.ollama
+      python-pkgs.requests
 #      python-pkgs.tensorboard
 #      python-pkgs.tensorflow
 #      python-pkgs.torchWithRocm

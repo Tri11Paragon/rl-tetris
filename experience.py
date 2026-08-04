@@ -9,6 +9,49 @@ import torch
 
 from config import DotDict
 
+class Util:
+    @staticmethod
+    def compute_returns(gamma: float, rewards, dones) -> np.ndarray:
+        assert len(rewards) == len(dones), "rewards and dones must have the same length"
+        discounted_returns = np.zeros(len(rewards), dtype=np.float32)
+
+        discounted_returns[-1] = rewards[-1]
+        for i in reversed(range(len(rewards) - 1)):
+            discounted_returns[i] = (1.0 - dones[i]) * discounted_returns[i + 1] * gamma + rewards[i]
+
+        return discounted_returns
+
+    @staticmethod
+    def generalized_advantage_estimate(gamma: float, lamda: float, rewards, state_values, dones, next_value = 0) -> tuple[torch.Tensor, torch.Tensor]:
+        assert len(rewards) == len(dones), "rewards and dones must have the same length"
+        assert len(rewards) == len(state_values), "rewards and state_values must have the same length"
+
+        size = len(rewards)
+        advantage = 0
+
+        device = state_values[0].device if len(state_values) > 0 else torch.device("cpu")
+
+        gae = torch.zeros(size, device=device)
+        returns = torch.zeros(size, device=device)
+
+        # Iterate backwards to compute GAE and returns correctly
+        for t in reversed(range(size)):
+            # Masking terminal states: if dones[t] is True, the next state is 0-valued
+            mask = 1.0 - dones[t]
+
+            # TD error delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
+            delta = rewards[t] + gamma * next_value * mask - state_values[t]
+
+            # GAE: A_t = delta_t + gamma * lambda * mask * A_{t+1}
+            # The mask here ensures that we reset the accumulation at episode boundaries
+            gae[t] = delta + gamma * lamda * mask * advantage
+
+            # Target return for critic training (Q-estimate)
+            returns[t] = gae[t] + state_values[t]
+
+            next_value = state_values[t]
+
+        return gae, returns
 
 # Trajectory holds a set of related experiences as part of an episode
 class Trajectory:
@@ -36,51 +79,18 @@ class Trajectory:
             value.clear()
 
     def compute_returns(self, gamma: float) -> np.ndarray:
-        discounted_returns = np.zeros(len(self), dtype=np.float32)
-        rewards = self.buffer["reward"]
-
-        discounted_returns[-1] = rewards[-1]
-        for i in reversed(range(len(self) - 1)):
-            discounted_returns[i] = (1.0 - self.buffer["done"][i]) * discounted_returns[i + 1] * gamma + rewards[i]
-
-        return discounted_returns
+        assert "done" in self.buffer and "reward" in self.buffer
+        return Util.compute_returns(gamma, self.buffer["reward"], self.buffer["done"])
 
     def compute_gae(self, gamma : float, lamda: float):
-        size = len(self)
-        # print(size)
-        advantage = 0
-        next_value = self.last_value
-
         assert "done" in self.buffer and "reward" in self.buffer and "state_value" in self.buffer
 
-        dones = self.buffer["done"]
-        rewards = self.buffer["reward"]
-        values = self.buffer["state_value"]
-
-        device = values[0].device if len(values) > 0 else torch.device("cpu")
-
-        gae = torch.zeros(size, device=device)
-        returns = torch.zeros(size, device=device)
-
-        # Iterate backwards to compute GAE and returns correctly
-        for t in reversed(range(size)):
-            # Masking terminal states: if dones[t] is True, the next state is 0-valued
-            mask = 1.0 - dones[t]
-
-            # TD error delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
-            delta = rewards[t] + gamma * next_value * mask - values[t]
-
-            # GAE: A_t = delta_t + gamma * lambda * mask * A_{t+1}
-            # The mask here ensures that we reset the accumulation at episode boundaries
-            advantage = delta + gamma * lamda * mask * advantage
-            gae[t] = advantage
-
-            # Target return for critic training (Q-estimate)
-            returns[t] = gae[t] + values[t]
-
-            next_value = values[t]
-
-        return gae, returns
+        return Util.generalized_advantage_estimate(
+            gamma, lamda,
+            self.buffer["reward"],
+            self.buffer["state_value"],
+            self.buffer["done"],
+            self.last_value)
 
     def get_terminals(self):
         return [i for i, v in enumerate(self.buffer["done"]) if v]
@@ -126,16 +136,10 @@ class ERMBuffer:
         self.buffer.extend(other.buffer)
         self.trim()
 
-    def compute_returns(self, gamma: float) -> tuple[np.ndarray, list[np.ndarray]]:
-        average_returns = np.zeros(len(self.buffer), dtype=np.float32)
-        returns = []
-
-        for i in range(len(self.buffer)):
-            rt = self.buffer[i].compute_returns(gamma)
-            average_returns[i] = rt.mean()
-            returns.append(rt)
-
-        return average_returns, returns
+    def compute_returns(self, gamma: float) -> torch.Tensor:
+        rewards = np.concat([np.array(traj.buffer["reward"]) for traj in self.buffer])
+        dones = np.concat([np.array(traj.buffer["done"]) for traj in self.buffer])
+        return torch.Tensor(Util.compute_returns(gamma, rewards, dones))
 
     def to_tensors(self):
         tensor_dict = defaultdict(list)
@@ -144,14 +148,13 @@ class ERMBuffer:
                 tensor_dict[field].append(torch.stack(arr))
         return {field: torch.cat(arr) for field, arr in tensor_dict.items()}
 
-    def compute_gae(self, gamma : float, lamda: float):
-        gaes = []
-        returns = []
-        for traj in self.buffer:
-            gae, ret = traj.compute_gae(gamma, lamda)
-            gaes.append(gae)
-            returns.append(ret)
-        return torch.cat(gaes), torch.cat(returns)
+    def compute_gae(self, gamma : float, lamda: float) -> tuple[torch.Tensor, torch.Tensor]:
+        device = self.buffer[0].buffer["state_value"][0].device
+        rewards = torch.Tensor(np.concat([np.array(traj.buffer["reward"]) for traj in self.buffer]), device=device)
+        dones = torch.Tensor(np.concat([np.array(traj.buffer["done"]) for traj in self.buffer]), device=device)
+        state_values = torch.cat([torch.cat(traj.buffer["state_value"]) for traj in self.buffer])
+        return Util.generalized_advantage_estimate(gamma, lamda,
+                                                   rewards, state_values, dones)
 
     def __len__(self):
         return sum(len(traj) for traj in self.buffer)
@@ -183,12 +186,33 @@ class PPOExperience(Experience):
         advantages, returns = buffer.compute_gae(config.network.gamma, config.network.ppo.lamda)
 
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = advantages.clip(-1, 1)
 
         return torch.utils.data.TensorDataset(
             tensors["state"],
             tensors["action"],
             tensors["logprob"],
             advantages,
+            returns
+        )
+
+@dataclass
+class ReinforceExperience(Experience):
+    state: torch.Tensor
+    action: torch.Tensor
+    reward: torch.Tensor
+    done: torch.Tensor
+
+    @staticmethod
+    def build_dataset(config: DotDict, buffer: ERMBuffer):
+        tensors = buffer.to_tensors()
+        returns = buffer.compute_returns(config.network.gamma)
+
+        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+
+        return torch.utils.data.TensorDataset(
+            tensors["state"],
+            tensors["action"],
             returns
         )
 
@@ -231,6 +255,7 @@ class ExperienceGenerator[T: Experience]:
         self.experience_fields = fields(experience_type)
         self.field_names = [field.name for field in fields(experience_type)]
         self.states = self.state_storage()
+        self.trajectories = [Trajectory() for _ in range(self.config.collection.parallelEnvs)]
         self.buffer = ERMBuffer(self.config)
         self.lines_cleared = []
 
@@ -250,7 +275,6 @@ class ExperienceGenerator[T: Experience]:
         )
         for i, engine in enumerate(self.engines):
             self.states[i] = engine.current_state()
-        trajectories = [Trajectory() for _ in range(self.config.collection.parallelEnvs)]
         run_iter = runs_progress
         if self.config.collection.type == "experiences":
             def nxt():
@@ -283,6 +307,7 @@ class ExperienceGenerator[T: Experience]:
                     state, reward, lines_cleared, game_over, truncated = self.engines[i].step(tetris.Action(actions[i].item()))
 
                     is_done = game_over or (truncated and self.config.tetris.truncate.rewardBoundary)
+                    should_stop_collection = truncated and self.config.tetris.truncate.stopCollection
 
                     reward = torch.tensor(reward)
                     done = torch.tensor(int(is_done))
@@ -303,29 +328,20 @@ class ExperienceGenerator[T: Experience]:
                     if "next_state" in self.field_names:
                         data_dict["next_state"] = torch.tensor(state)
 
-                    trajectories[i].append(data_dict)
+                    self.trajectories[i].append(data_dict)
                     self.states[i] = state
 
-                    if game_over:
-                        trajectories[i].set_last_value(0) # Value is masked out anyway
-                        buffer.append(trajectories[i])
-                        trajectories[i] = Trajectory()
 
-                        self.lines_cleared.append(self.engines[i].lines)
+                    if game_over or should_stop_collection:
+                        self.trajectories[i].set_last_value(0) # Value is masked out anyway
+                        buffer.append(self.trajectories[i])
+                        self.trajectories[i] = Trajectory()
 
-                        self.states[i] = self.engines[i].reset()
-                        finished[i] = True
-                    elif truncated:
-                        if not is_done:
-                            with torch.no_grad():
-                                self.model(torch.Tensor(state).unsqueeze(0).to(self.model.device))
-                                trajectories[i].set_last_value(self.model.get("state_value").squeeze())
-                        else:
-                            trajectories[i].set_last_value(0)
-                        buffer.append(trajectories[i])
-                        trajectories[i] = Trajectory()
-                        if self.config.tetris.truncate.stopCollection:
-                            finished[i] = True
+                        if game_over:
+                            self.lines_cleared.append(self.engines[i].lines)
+                            self.states[i] = self.engines[i].reset()
+
+                        finished[i] = game_over or should_stop_collection
 
                 if all(finished):
                     break
@@ -373,7 +389,7 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
         self.train_func()
         return loader, buffer
 
-    def train(self) -> tuple[float, float]:
+    def train(self) -> float:
         epochs_progress = tqdm(
             range(self.config.training.epoch.epochs) if self.config.training.type == "epoch" else None,
             desc="Epochs",
@@ -388,6 +404,10 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
                 epochs_progress.update(1)
                 if self.config.training.kl.useEpochLimit and epochs_progress.n > self.config.training.epoch.epochs:
                     return False
+
+                # Could use this local KL estimate to limit the number of experiences alongside the kl estimate
+                # take the number of experiences before hitting kl cutoff and min(double of value, constant) as the generation amount
+                # or don't have the min and use this for fully automatic scaling.
                 if len(self.storage["kl_estimate"]) > 0:
                     kl_estimate = np.array(self.storage["_kl_batch_estimate"]).mean()
                     epochs_progress.set_postfix({
@@ -401,13 +421,12 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
 
         loader, buffer = self.build_dataset(epochs_progress)
 
-        total_loss = 0
         total_batches = 0
 
         self.storage.clear()
         for _ in loop_iter:
             for batch in loader:
-                total_loss += self.step_func(self, tuple(b.to(self.device) for b in batch))
+                self.step_func(self, tuple(b.to(self.device) for b in batch))
                 total_batches += 1
                 if self.should_exit:
                     break
@@ -427,42 +446,7 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
         if hasattr(self.generator.experience_type, "post_train"):
             self.generator.experience_type.post_train(self)
 
-        return float(total_loss), float(total_batches)
-
-class NetworkLossTrainer[T: Experience](NetworkEpochTrainer[T]):
-    def train(self) -> tuple[float | int, int]:
-        epochs_progress = tqdm(
-            None,
-            desc="Epochs",
-            dynamic_ncols=True,
-            leave=False,
-            position=1
-        )
-
-        loader, buffer = self.build_dataset()
-
-        min_loss = float("inf")
-        last_update = 0
-
-        while True:
-            total_loss = 0
-            batches = 0
-
-            for batch in loader:
-                self.step_func(self, tuple(b.to(self.device) for b in batch))
-                total_loss += self.storage["total_loss"]
-                batches += 1
-            avg_loss = abs(float(total_loss) / float(batches))
-
-            epochs_progress.update(1)
-            if avg_loss < min_loss:
-                min_loss = avg_loss
-                last_update = epochs_progress.n
-
-            if epochs_progress.n - last_update > self.config.training.epoch.epochs // 10:
-                break
-
-        return min_loss, last_update
+        return float(total_batches)
 
 
 
