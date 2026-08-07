@@ -437,6 +437,82 @@ pub mod engine {
             }
             Some(new_piece)
         }
+
+        pub fn clear_lines(&mut self) -> u32 {
+            let full_rows = self.columns.iter()
+                .fold(!0u32, |acc, col| acc & *col);
+
+            if full_rows == 0 {
+                return 0;
+            }
+
+            let cleared = full_rows.count_ones();
+
+            for col in &mut self.columns {
+                let mut new_col = 0u32;
+                let mut dst_y = H - 1;
+
+                for src_y in (0..H).rev() {
+                    let src_bit = 1u32 << src_y;
+
+                    if full_rows & src_bit != 0 {
+                        continue;
+                    }
+
+                    if *col & src_bit != 0 {
+                        new_col |= 1u32 << dst_y;
+                    }
+
+                    dst_y -= 1;
+                }
+
+                *col = new_col;
+            }
+
+            cleared
+        }
+
+        pub fn compute_heights_holes(&self) -> ([u32; W], u32) {
+            let mut heights = [0; W];
+            let mut holes = 0;
+            for (i, col) in self.columns.iter().enumerate() {
+                let trailing_zeros = col.trailing_zeros();
+                heights[i] = trailing_zeros;
+                holes += col.count_zeros() - trailing_zeros;
+            }
+            (heights, holes)
+        }
+
+        pub fn compute_height_holes_bumps(&self) -> ([u32; W], f64, f64) {
+            let (heights, holes) = self.compute_heights_holes();
+            let mut bumps = 0;
+            for i in 0..heights.len() - 1 {
+                bumps += (heights[i] as i32 - heights[i + 1] as i32).unsigned_abs();
+            }
+            (heights, holes as f64, bumps as f64)
+        }
+
+        pub fn paper_reward_metric(&self, lines: u32) -> f64 {
+            let (heights, holes, bumps) = self.compute_height_holes_bumps();
+            let aggregate_height = heights.iter().sum::<u32>() as f64;
+            -0.510066 * aggregate_height
+                + 0.760666 * (lines * lines) as f64
+                + -0.35663 * holes
+                + -0.184483 * bumps
+        }
+
+        pub fn brett_reward_metric(&self, lines: u32) -> f64 {
+            let (heights, holes, bumps) = self.compute_height_holes_bumps();
+            let aggregate_height = heights.iter().sum::<u32>() as f64 / W as f64;
+            let max_height = unsafe {
+                *heights.iter().max().unwrap_unchecked()
+            } as f64;
+            -0.510066 * aggregate_height
+                + (0.760666 * 16.) * (lines * lines) as f64
+                + -(0.35663 * 4.) * holes
+                + -0.184483 * bumps
+                + -1.2 * max_height
+        }
     }
 
     pub static PIECE_TYPES: [PieceType; 7] = [PieceType::I, PieceType::O, PieceType::T,
@@ -491,7 +567,7 @@ pub mod engine {
                 current_piece: bag.next_piece(&mut rng),
                 next_piece: bag.next_piece(&mut rng),
                 rng,
-                bag 
+                bag
             }
         }
 

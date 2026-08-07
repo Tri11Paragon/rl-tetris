@@ -12,5 +12,21 @@ pub fn test_something() {
     let piece = piece.rotate(1);
     let piece = piece.mv(2, 19);
     grid.place_piece(&piece);
+    let piece = Piece::new(PieceType::S);
+    let piece = piece.rotate(1);
+    let piece = piece.mv(5, 18);
+    grid.place_piece(&piece);
+    let piece = Piece::new(PieceType::O);
+    let piece = piece.mv(-1, 20);
+    grid.place_piece(&piece);
+    let piece = Piece::new(PieceType::O);
+    let piece = piece.mv(-1 - 2, 20);
+    grid.place_piece(&piece);
+    let piece = Piece::new(PieceType::J);
+    let piece = piece.rotate(1);
+    let piece = piece.mv(-3, 19);
+    grid.place_piece(&piece);
+    grid.print();
+    println!("Lines Cleared: {}", grid.clear_lines());
     grid.print();
 }
