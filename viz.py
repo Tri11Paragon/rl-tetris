@@ -135,7 +135,7 @@ def main():
 
     a_slider.on_changed(update_rolling_window)
 
-    fig.suptitle(f"Recorded attributes for {args.file} with network '{cfg.network.type}'")
+    fig.suptitle(f"Recorded attributes for {args.file} with network '{cfg.network.mode}'")
     fig.tight_layout()
     plt.subplots_adjust(bottom=0.1)
     plt.show()

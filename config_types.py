@@ -12,9 +12,9 @@ class Training:
 	batchSize: int
 	epoch: Epoch
 	kl: Kl
+	mode: str
 	saveInterval: int
 	shuffle: bool
-	type: str
 
 @dataclass
 class Kl:
@@ -108,24 +108,14 @@ class Network:
 	gamma: float
 	init_lr: Init_lr
 	min_lr: Min_lr
-	model: Model
+	mode: str
 	ppo: Ppo
-	type: str
 
 @dataclass
 class Ppo:
 	entropy: float
 	lamda: int
 	minEntropy: float
-
-@dataclass
-class Model:
-	conv_filters: Conv_filters
-
-@dataclass
-class Conv_filters:
-	lr: str
-	modules: list
 
 @dataclass
 class Min_lr:
@@ -151,16 +141,16 @@ class Clipping:
 @dataclass
 class Apa:
 	entropy: float
-	lamda: float
+	lamda: int
 
 @dataclass
 class Collection:
 	erm: Erm
 	experiences: int
 	maxExperiencesPerTrajectory: int
+	mode: str
 	parallelEnvs: int
 	runs: int
-	type: str
 
 @dataclass
 class Erm:

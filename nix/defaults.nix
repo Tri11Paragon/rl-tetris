@@ -1,7 +1,7 @@
 helpers: with helpers; {
     network = {
         # 'ppo', 'dqn' or 'apa'
-        type = "ppo";
+        mode = "ppo";
         init_lr = {
             convLearnRate = e- 5;
             actorLearnRate = e- 5;
@@ -32,17 +32,9 @@ helpers: with helpers; {
         dqn = {
             temperature = 1.1;
         };
-        model = {
-            conv_filters = {
-                modules = [
-                    {type="conv2d"; i=2; o=32; kernel=[3 3]; padding=1;}
-                ];
-                lr = "network.init_lr.convLearnRate";
-            };
-        };
     };
     training = {
-        type = "kl";
+        mode = "kl";
         batchSize = 64;
         saveInterval = 5;
         shuffle = true;
@@ -57,7 +49,7 @@ helpers: with helpers; {
     };
     collection = {
         # either 'runs' or 'experiences'
-        type = "experiences";
+        mode = "experiences";
         runs = 100;
         experiences = 2048;
 

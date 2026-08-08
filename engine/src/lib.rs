@@ -1,5 +1,6 @@
 #[cfg(test)]
 pub mod test;
+pub mod types;
 
 use pyo3::prelude::*;
 
@@ -9,6 +10,8 @@ pub mod engine {
     use std::fmt::Debug;
     use pyo3::prelude::*;
     use rand::{SeedableRng, Rng, RngExt, seq::SliceRandom};
+    use serde_json::Value;
+    use serde::{Deserialize, Serialize};
 
     pub trait SeedRng: SeedableRng + Rng + RngExt {}
 
@@ -440,7 +443,7 @@ pub mod engine {
 
         pub fn clear_lines(&mut self) -> u32 {
             let full_rows = self.columns.iter()
-                .fold(!0u32, |acc, col| acc & *col);
+                .fold(u32::MAX, |acc, col| acc & *col);
 
             if full_rows == 0 {
                 return 0;
@@ -555,6 +558,10 @@ pub mod engine {
         bag: BagOfPieces,
         current_piece: Piece,
         next_piece: Piece,
+        lines: u64,
+        score: u64,
+        actions_left: i32,
+        placement_horizon_counter: i32
     }
 
     impl <const W: usize, const H: usize, RNG: SeedRng> TetrisEngine<W, H, RNG> {
@@ -567,7 +574,11 @@ pub mod engine {
                 current_piece: bag.next_piece(&mut rng),
                 next_piece: bag.next_piece(&mut rng),
                 rng,
-                bag
+                bag,
+                lines: 0,
+                score: 0,
+                actions_left: 10,
+                placement_horizon_counter: 0
             }
         }
 

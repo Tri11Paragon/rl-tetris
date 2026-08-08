@@ -70,5 +70,8 @@ class Config:
             f.write("from dataclasses import dataclass\n")
             f.write(nix_data["python"])
 
+        with open(script_dir + "/engine/src/types.rs", "w") as f:
+            f.write(nix_data["rust"])
+
     def load(self) -> DotDict:
         return DotDict(self.config)

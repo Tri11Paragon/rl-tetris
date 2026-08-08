@@ -45,8 +45,10 @@
     updated_attribs = lib.recursiveUpdate default validatedConfig;
 
     python_types = import ./gentypes.nix updated_attribs;
+    rust_types = import ./genrustypes.nix updated_attribs;
 
 in {
     config_data=updated_attribs;
     python=python_types;
+    rust=rust_types;
 }
