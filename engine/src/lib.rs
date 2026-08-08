@@ -12,6 +12,7 @@ pub mod engine {
     use rand::{SeedableRng, Rng, RngExt, seq::SliceRandom};
     use serde_json::Value;
     use serde::{Deserialize, Serialize};
+    use super::types;
 
     pub trait SeedRng: SeedableRng + Rng + RngExt {}
 
