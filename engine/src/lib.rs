@@ -7,12 +7,14 @@ use pyo3::prelude::*;
 /// A Python module implemented in Rust.
 #[pymodule]
 pub mod engine {
-    use std::fmt::Debug;
-    use pyo3::prelude::*;
-    use rand::{SeedableRng, Rng, RngExt, seq::SliceRandom};
-    use serde_json::Value;
-    use serde::{Deserialize, Serialize};
+    use std::ascii::AsciiExt;
     use super::types;
+    use pyo3::prelude::*;
+    use rand::{Rng, RngExt, SeedableRng, seq::SliceRandom};
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+    use std::fmt::Debug;
+    use std::hint::black_box;
 
     pub trait SeedRng: SeedableRng + Rng + RngExt {}
 
@@ -87,9 +89,8 @@ pub mod engine {
                     largest_height: 4,
                 },
             ],
-            size: 4
+            size: 4,
         },
-
         // square
         PieceRotations {
             shapes: [
@@ -114,9 +115,8 @@ pub mod engine {
                     largest_height: 2,
                 },
             ],
-            size: 2
+            size: 2,
         },
-
         // hat
         PieceRotations {
             shapes: [
@@ -141,9 +141,8 @@ pub mod engine {
                     largest_height: 3,
                 },
             ],
-            size: 3
+            size: 3,
         },
-
         // right_snake
         PieceRotations {
             shapes: [
@@ -168,9 +167,8 @@ pub mod engine {
                     largest_height: 2,
                 },
             ],
-            size: 3
+            size: 3,
         },
-
         // left_snake
         PieceRotations {
             shapes: [
@@ -195,9 +193,8 @@ pub mod engine {
                     largest_height: 2,
                 },
             ],
-            size: 3
+            size: 3,
         },
-
         // left_gun
         PieceRotations {
             shapes: [
@@ -222,9 +219,8 @@ pub mod engine {
                     largest_height: 3,
                 },
             ],
-            size: 3
+            size: 3,
         },
-
         // right_gun
         PieceRotations {
             shapes: [
@@ -249,7 +245,7 @@ pub mod engine {
                     largest_height: 3,
                 },
             ],
-            size: 3
+            size: 3,
         },
     ];
 
@@ -351,7 +347,7 @@ pub mod engine {
 
         pub fn print(&self) {
             let mut data = Vec::with_capacity(H);
-            for _ in 0..H{
+            for _ in 0..H {
                 data.push(Vec::<char>::with_capacity(W));
             }
             for column in self.columns {
@@ -459,8 +455,7 @@ pub mod engine {
         }
 
         pub fn clear_lines(&mut self) -> u32 {
-            let full_rows = self.columns.iter()
-                .fold(u32::MAX, |acc, col| acc & *col);
+            let full_rows = self.columns.iter().fold(u32::MAX, |acc, col| acc & *col);
 
             if full_rows == 0 {
                 return 0;
@@ -515,18 +510,13 @@ pub mod engine {
         pub fn paper_reward_metric(&self, lines: u32) -> f64 {
             let (heights, holes, bumps) = self.compute_height_holes_bumps();
             let aggregate_height = heights.iter().sum::<u32>() as f64;
-            -0.510066 * aggregate_height
-                + 0.760666 * (lines * lines) as f64
-                + -0.35663 * holes
-                + -0.184483 * bumps
+            -0.510066 * aggregate_height + 0.760666 * (lines * lines) as f64 + -0.35663 * holes + -0.184483 * bumps
         }
 
         pub fn brett_reward_metric(&self, lines: u32) -> f64 {
             let (heights, holes, bumps) = self.compute_height_holes_bumps();
             let aggregate_height = heights.iter().sum::<u32>() as f64;
-            let max_height = unsafe {
-                *heights.iter().max().unwrap_unchecked()
-            } as f64;
+            let max_height = unsafe { *heights.iter().max().unwrap_unchecked() } as f64;
             -0.510066 * aggregate_height
                 + (0.760666 * 16.) * (lines * lines) as f64
                 + -(0.35663 * 4.) * holes
@@ -539,13 +529,20 @@ pub mod engine {
         }
     }
 
-    pub static PIECE_TYPES: [PieceType; 7] = [PieceType::I, PieceType::O, PieceType::T,
-        PieceType::S, PieceType::Z, PieceType::J, PieceType::L];
+    pub static PIECE_TYPES: [PieceType; 7] = [
+        PieceType::I,
+        PieceType::O,
+        PieceType::T,
+        PieceType::S,
+        PieceType::Z,
+        PieceType::J,
+        PieceType::L,
+    ];
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub struct BagOfPieces {
         pieces: [PieceType; 7],
-        index: usize
+        index: usize,
     }
 
     impl Default for BagOfPieces {
@@ -558,7 +555,7 @@ pub mod engine {
         pub fn new() -> Self {
             Self {
                 pieces: PIECE_TYPES,
-                index: 0
+                index: 0,
             }
         }
 
@@ -576,6 +573,8 @@ pub mod engine {
     pub struct TetrisEngine<const W: usize, const H: usize, RNG: SeedRng> {
         grid: Grid<W, H>,
         config: &'static types::NNConfig,
+        discouraged_actions: Vec<Action>,
+        encouraged_actions: Vec<Action>,
         rng: RNG,
         bag: BagOfPieces,
         current_piece: Piece,
@@ -586,6 +585,7 @@ pub mod engine {
         placement_horizon_counter: i64,
         last_actions: Vec<Action>,
         is_game_over: bool,
+        is_truncated: bool,
         placed_last: bool,
     }
 
@@ -605,12 +605,27 @@ pub mod engine {
         pub fn is_game_over(&self) -> bool {
             matches!(self, ActionResult::GameOver)
         }
+
+        pub fn is_placed(&self) -> bool {
+            matches!(self, ActionResult::Placed)
+        }
     }
 
-    impl <const W: usize, const H: usize, RNG: SeedRng> TetrisEngine<W, H, RNG> {
+    impl<const W: usize, const H: usize, RNG: SeedRng> TetrisEngine<W, H, RNG> {
         pub fn new(seed: RNG::Seed, config: &'static types::NNConfig) -> Self {
             let mut rng = RNG::from_seed(seed);
             let mut bag = BagOfPieces::new();
+
+            let mut discouraged_actions = Vec::new();
+            let mut encouraged_actions = Vec::new();
+
+            for action_str in config.tetris.discouraged_actions.actions.iter() {
+                discouraged_actions.push(Action::from(action_str.as_str().unwrap()));
+            }
+
+            for action_str in config.tetris.encouraged_actions.actions.iter() {
+                encouraged_actions.push(Action::from(action_str.as_str()));
+            }
 
             Self {
                 grid: Grid::new(),
@@ -623,8 +638,11 @@ pub mod engine {
                 actions_left: config.tetris.decay.actions_until_drop,
                 placement_horizon_counter: config.tetris.truncate.placement_timer.value,
                 config,
+                discouraged_actions,
+                encouraged_actions,
                 last_actions: Vec::new(),
                 is_game_over: false,
+                is_truncated: false,
                 placed_last: false,
             }
         }
@@ -681,13 +699,21 @@ pub mod engine {
             Ok(ActionResult::None)
         }
 
-        pub fn force_place(&mut self) {
-            self.place_current().expect("Piece placement failed on down move. This \
-                            should not be possible.");
+        pub fn force_place(&mut self) -> ActionResult {
+            self.place_current()
+                .expect("Piece placement failed on down move. This should not be possible.")
+        }
+
+        pub fn force_drop_place(&mut self) -> ActionResult {
+            while let Ok(new_piece) = self.grid.try_action_down(&self.current_piece) {
+                self.current_piece = new_piece;
+            }
+            self.force_place()
         }
 
         pub fn handle_decay(&mut self, action: Action) -> Result<ActionResult, MovementFailureReason> {
-            if action != Action::Down && self.config.tetris.decay.enabled {
+            // no decay on action down or if the action resulted in a placement.
+            if action != Action::Down && self.config.tetris.decay.enabled && !self.placed_last {
                 self.actions_left -= 1;
                 if self.actions_left <= 0 {
                     self.actions_left = self.config.tetris.decay.actions_until_drop;
@@ -701,65 +727,92 @@ pub mod engine {
             Ok(ActionResult::None)
         }
 
+        fn handle_action_ok(&mut self, action: &Action) -> ActionResult {
+            match action {
+                Action::HardDrop => {
+                    self.score += self.current_piece.drop as u64;
+                    self.force_place()
+                }
+                Action::Left | Action::Right => {
+                    #[allow(clippy::collapsible_match)]
+                    if self.grid.try_action_down(&self.current_piece).is_err() {
+                        return self.force_place();
+                    }
+                    ActionResult::None
+                }
+                _ => ActionResult::None,
+            }
+        }
+
+        fn handle_action_err(&mut self, reason: MovementFailureReason, action: &Action) -> ActionResult {
+            if reason == MovementFailureReason::OutOfBounds {
+                match action {
+                    Action::Right => {}
+                    Action::Left => {}
+                    _ => {}
+                }
+            }
+            match action {
+                Action::Right => {}
+                Action::Left => {}
+                Action::Rotate => {
+                    if self.grid.try_action_down(&self.current_piece).is_err() {
+                        return self.force_place();
+                    }
+                }
+                Action::Down | Action::HardDrop => {
+                    return self.force_place();
+                }
+            }
+            ActionResult::None
+        }
+
         pub fn step(&mut self, action: Action) {
             self.placed_last = false;
 
             let lines = self.lines;
             let pre_reward = self.grid.reward_metric(lines as u32);
-            let mut game_over = false;
-            let mut truncated = false;
 
             let action_result = match action {
                 Action::Right => self.grid.try_action_right(&self.current_piece),
                 Action::Left => self.grid.try_action_left(&self.current_piece),
                 Action::Down => self.grid.try_action_down(&self.current_piece),
                 Action::Rotate => self.grid.try_action_rotate(&self.current_piece),
-                Action::HardDrop => self.grid.try_action_hard_drop(&self.current_piece)
+                Action::HardDrop => self.grid.try_action_hard_drop(&self.current_piece),
             };
 
-            match action_result {
+            let result = match action_result {
                 Ok(new_piece) => {
                     self.current_piece = new_piece;
-                    if action == Action::HardDrop {
-                        self.score += self.current_piece.drop as u64;
-                        self.force_place();
-                    }
-                },
-                Err(reason) => {
-                    if reason == MovementFailureReason::OutOfBounds {
-                        match action {
-                            Action::Right => {
-
-                            },
-                            Action::Left => {
-
-                            },
-                            _ => {}
-                        }
-                    }
-                    match action {
-                        Action::Right => {}
-                        Action::Left => {}
-                        Action::Rotate => {
-                            if self.grid.try_action_down(&self.current_piece).is_err() {
-                                self.force_place();
-                            }
-                        }
-                        Action::Down | Action::HardDrop => {
-                            self.force_place();
-                        }
-                    }
+                    self.handle_action_ok(&action)
                 }
-            }
+                Err(reason) => self.handle_action_err(reason, &action),
+            };
+            self.last_actions.push(action);
+
+            self.is_game_over |= result.is_game_over();
+            self.is_truncated |= result.is_placed()
+                && self.config.tetris.truncate.piece_placement_truncates;
 
             let decay_result = self.handle_decay(action);
             if let Ok(decay_result) = decay_result {
-                game_over = decay_result.is_game_over();
+                self.is_game_over |= decay_result.is_game_over();
             } else if let Err(decay_result) = decay_result {
-                panic!{"Decay Action failed: {:?}. This should not be possible.", decay_result}
+                panic! {"Decay Action failed: {:?}. This should not be possible.", decay_result}
             }
+
+            let post_reward = self.grid.reward_metric(self.lines as u32);
+            let lines_cleared = self.lines - lines;
+            let reward = post_reward - pre_reward;
+
+
         }
 
+        pub fn state(&self) -> (Grid<W, H>, Grid<W, H>) {
+            let mut piece_grid = Grid::<W, H>::new();
+            piece_grid.place_piece(&self.current_piece).expect("Shouldn't be possible");
+            (self.grid, piece_grid)
+        }
     }
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -781,6 +834,20 @@ pub mod engine {
                 3 => Action::Rotate,
                 4 => Action::HardDrop,
                 _ => unreachable!("Invalid action value"),
+            }
+        }
+    }
+
+    impl From<&str> for Action {
+        fn from(value: &str) -> Self {
+            match value.to_ascii_uppercase().as_str() {
+                "RIGHT" => Action::Right,
+                "LEFT" => Action::Left,
+                "DOWN" => Action::Down,
+                "ROTATE" => Action::Rotate,
+                "HARDDROP" => Action::HardDrop,
+                "HARD_DROP" => Action::HardDrop,
+                _ => panic!("Invalid action value"),
             }
         }
     }
