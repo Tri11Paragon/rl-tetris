@@ -35,17 +35,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine"
-version = "0.1.0"
-dependencies = [
- "numpy",
- "pyo3",
- "rand",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -350,6 +339,17 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "tetris"
+version = "0.1.0"
+dependencies = [
+ "numpy",
+ "pyo3",
+ "rand",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "unicode-ident"

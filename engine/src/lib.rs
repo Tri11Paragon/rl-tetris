@@ -6,13 +6,18 @@ use pyo3::prelude::*;
 
 /// A Python module implemented in Rust.
 #[pymodule]
-pub mod engine {
+pub mod tetris {
     use super::types;
     use numpy::{IntoPyArray, PyArray3, PyArrayMethods};
     use pyo3::prelude::*;
     use rand::{RngExt, SeedableRng, seq::SliceRandom};
     use std::collections::{HashMap, HashSet};
     use std::fmt::Debug;
+
+    #[pymodule_export]
+    pub const MATRIX_WIDTH: usize = 10;
+    #[pymodule_export]
+    pub const MATRIX_HEIGHT: usize = 20;
 
     #[repr(u32)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -999,7 +1004,7 @@ pub mod engine {
 
     #[pyclass]
     pub struct PyTetrisEngine {
-        engine: TetrisEngine<10, 22, rand::rngs::SmallRng>,
+        engine: TetrisEngine<MATRIX_WIDTH, MATRIX_HEIGHT, rand::rngs::SmallRng>,
     }
 
     fn state_to_numpy<'py, const W: usize, const H: usize>(
@@ -1036,7 +1041,7 @@ pub mod engine {
         pub fn step<'py>(
             &mut self,
             py: Python<'py>,
-            action: PyAction,
+            action: u32,
         ) -> PyResult<(Bound<'py, PyArray3<u8>>, f64, u64, bool, bool)> {
             let (state, reward, lines_cleared, game_over, truncated) = self.engine.step(Action::from(action));
             Ok((state_to_numpy(py, state), reward, lines_cleared, game_over, truncated))

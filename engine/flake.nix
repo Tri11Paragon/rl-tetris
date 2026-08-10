@@ -8,28 +8,18 @@
   outputs =
     { self, nixpkgs }:
     let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
-      ];
+      system = "x86_64-linux";
 
-      forAllSystems =
-        f:
-        nixpkgs.lib.genAttrs systems (
-          system:
-          f import nixpkgs {
-            inherit system;
-          }
-        );
+      pkgs = import nixpkgs {
+        inherit system;
+      };
     in
     {
-      packages = forAllSystems (
-        pkgs:
-        {
-          default = pkgs.python311Packages.buildPythonPackage rec {
-            pname = "engine";
+      package = pkgs: python:
+        let
+            python_pkgs = python.pkgs;
+        in python_pkgs.buildPythonPackage rec {
+            pname = "tetris";
             version = "0.1.0";
 
             pyproject = true;
@@ -38,16 +28,19 @@
 
             nativeBuildInputs = [
               pkgs.rustPlatform.cargoSetupHook
-              pkgs.rustPlatform.maturinBuildHook
+#              pkgs.rustPlatform.maturinBuildHook
+              pkgs.cargo
+              pkgs.maturin
+              pkgs.rustc
               pkgs.pkg-config
             ];
 
             buildInputs = [
-              pkgs.python311
+              python
             ];
 
             propagatedBuildInputs = [
-              pkgs.python311Packages.numpy
+              python_pkgs.numpy
             ];
 
             cargoDeps = pkgs.rustPlatform.importCargoLock {
@@ -55,35 +48,8 @@
             };
 
             pythonImportsCheck = [
-              "engine"
+              "tetris"
             ];
-          };
-        }
-      );
-
-      devShells = forAllSystems (
-        pkgs:
-        {
-          default =
-            let
-              engine = self.packages.${pkgs.system}.default;
-              python = pkgs.python311.withPackages (
-                ps: [
-                  engine
-                  ps.numpy
-                  ps.maturin
-                ]
-              );
-            in
-            pkgs.mkShell {
-              packages = [
-                python
-                pkgs.cargo
-                pkgs.rustc
-                pkgs.maturin
-              ];
-            };
-        }
-      );
+        };
     };
 }

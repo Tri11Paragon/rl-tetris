@@ -1,3 +1,3 @@
-import engine
+import tetris
 
-print(engine.sum_as_string(1, 2))
+engine = tetris.PyTetrisEngine(3123, "{}")
