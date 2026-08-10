@@ -93,8 +93,8 @@ config: let
 
       rustType = memberName: value:
         if builtins.isAttrs value then pascalCase memberName
-        else if builtins.isFloat value then "f64"
-        else if builtins.isInt value then "i64"
+        else if builtins.isFloat value then "serde_json::Number"
+        else if builtins.isInt value then "serde_json::Number"
         else if builtins.isString value then "String"
         else if builtins.isBool value then "bool"
         else if builtins.isList value then rustListType memberName value
@@ -108,11 +108,11 @@ config: let
             first = builtins.elemAt value 0;
           in
             if builtins.isAttrs first then "Vec<" + pascalCase memberName + "Item>"
-            else if builtins.isFloat first then "Vec<f64>"
-            else if builtins.isInt first then "Vec<i64>"
-            else if builtins.isString first then "Vec<String>"
-            else if builtins.isBool first then "Vec<bool>"
-            else if builtins.isList first then "Vec<serde_json::Value>"
+            else if builtins.isFloat first then "Vec<serde_json::Number>"
+            else if builtins.isInt first then "Vec<serde_json::Number>"
+#            else if builtins.isString first then "Vec<String>"
+#            else if builtins.isBool first then "Vec<bool>"
+#            else if builtins.isList first then "Vec<serde_json::Value>"
             else "Vec<serde_json::Value>";
 
       makeRustMember = set: memberName:

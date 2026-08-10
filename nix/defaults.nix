@@ -105,7 +105,7 @@ helpers: with helpers; {
             };
             earlyMove = {
                 enabled = true;
-                diminishFactor = 0.75;
+                diminishFactor = 2.5;
                 # if an action isn't in this it doesn't reward
                 actionsReward = [
                     {name = "LEFT"; reward = 0.5;}

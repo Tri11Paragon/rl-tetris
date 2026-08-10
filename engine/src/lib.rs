@@ -7,16 +7,12 @@ use pyo3::prelude::*;
 /// A Python module implemented in Rust.
 #[pymodule]
 pub mod engine {
-    use std::ascii::AsciiExt;
     use super::types;
+    use numpy::{IntoPyArray, PyArray3, PyArrayMethods};
     use pyo3::prelude::*;
-    use rand::{Rng, RngExt, SeedableRng, seq::SliceRandom};
-    use serde::{Deserialize, Serialize};
-    use serde_json::Value;
+    use rand::{RngExt, SeedableRng, seq::SliceRandom};
+    use std::collections::{HashMap, HashSet};
     use std::fmt::Debug;
-    use std::hint::black_box;
-
-    pub trait SeedRng: SeedableRng + Rng + RngExt {}
 
     #[repr(u32)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,7 +268,7 @@ pub mod engine {
             }
         }
 
-        pub fn random_piece<RNG: SeedRng>(rng: &mut RNG) -> Self {
+        pub fn random_piece<RNG: RngExt>(rng: &mut RNG) -> Self {
             Self::new(match rng.random_range(0..7) {
                 0 => PieceType::I,
                 1 => PieceType::O,
@@ -521,7 +517,7 @@ pub mod engine {
                 + (0.760666 * 16.) * (lines * lines) as f64
                 + -(0.35663 * 4.) * holes
                 + -0.184483 * bumps
-                + -1.2 * max_height
+                + -0.1 * max_height
         }
 
         pub fn reward_metric(&self, lines: u32) -> f64 {
@@ -559,7 +555,7 @@ pub mod engine {
             }
         }
 
-        pub fn next_piece(&mut self, rng: &mut impl SeedRng) -> Piece {
+        pub fn next_piece(&mut self, rng: &mut impl RngExt) -> Piece {
             if self.index >= self.pieces.len() {
                 self.index = 0;
                 self.pieces.shuffle(rng);
@@ -570,11 +566,24 @@ pub mod engine {
         }
     }
 
-    pub struct TetrisEngine<const W: usize, const H: usize, RNG: SeedRng> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct State<const W: usize, const H: usize> {
+        board: Grid<W, H>,
+        piece: Grid<W, H>,
+    }
+
+    impl<const W: usize, const H: usize> State<W, H> {
+        pub fn new(board: Grid<W, H>, piece: Grid<W, H>) -> Self {
+            Self { board, piece }
+        }
+    }
+
+    pub struct TetrisEngine<const W: usize, const H: usize, RNG: SeedableRng + RngExt> {
         grid: Grid<W, H>,
-        config: &'static types::NNConfig,
-        discouraged_actions: Vec<Action>,
-        encouraged_actions: Vec<Action>,
+        config: types::NNConfig,
+        discouraged_actions: HashSet<Action>,
+        encouraged_actions: HashSet<Action>,
+        early_move_actions: HashMap<Action, f64>,
         rng: RNG,
         bag: BagOfPieces,
         current_piece: Piece,
@@ -611,20 +620,27 @@ pub mod engine {
         }
     }
 
-    impl<const W: usize, const H: usize, RNG: SeedRng> TetrisEngine<W, H, RNG> {
-        pub fn new(seed: RNG::Seed, config: &'static types::NNConfig) -> Self {
-            let mut rng = RNG::from_seed(seed);
+    impl<const W: usize, const H: usize, RNG: SeedableRng + RngExt> TetrisEngine<W, H, RNG> {
+        pub fn new(mut rng: RNG, config: types::NNConfig) -> Self {
             let mut bag = BagOfPieces::new();
 
-            let mut discouraged_actions = Vec::new();
-            let mut encouraged_actions = Vec::new();
+            let mut discouraged_actions = HashSet::new();
+            let mut encouraged_actions = HashSet::new();
+            let mut early_move_actions = HashMap::new();
 
             for action_str in config.tetris.discouraged_actions.actions.iter() {
-                discouraged_actions.push(Action::from(action_str.as_str().unwrap()));
+                discouraged_actions.insert(Action::from(action_str.as_str().unwrap()));
             }
 
             for action_str in config.tetris.encouraged_actions.actions.iter() {
-                encouraged_actions.push(Action::from(action_str.as_str()));
+                encouraged_actions.insert(Action::from(action_str.as_str().unwrap()));
+            }
+
+            for action_rwd in &config.tetris.states.early_move.actions_reward {
+                early_move_actions.insert(
+                    Action::from(action_rwd.name.as_str()),
+                    action_rwd.reward.as_f64().unwrap_or(0.),
+                );
             }
 
             Self {
@@ -635,11 +651,12 @@ pub mod engine {
                 bag,
                 lines: 0,
                 score: 0,
-                actions_left: config.tetris.decay.actions_until_drop,
-                placement_horizon_counter: config.tetris.truncate.placement_timer.value,
+                actions_left: config.tetris.decay.actions_until_drop.as_i64().unwrap_or(0),
+                placement_horizon_counter: config.tetris.truncate.placement_timer.value.as_i64().unwrap_or(0),
                 config,
                 discouraged_actions,
                 encouraged_actions,
+                early_move_actions,
                 last_actions: Vec::new(),
                 is_game_over: false,
                 is_truncated: false,
@@ -654,8 +671,8 @@ pub mod engine {
             self.last_actions.clear();
             self.placed_last = false;
             self.is_game_over = false;
-            self.actions_left = self.config.tetris.decay.actions_until_drop;
-            self.placement_horizon_counter = self.config.tetris.truncate.placement_timer.value;
+            self.actions_left = self.config.tetris.decay.actions_until_drop.as_i64().unwrap_or(0);
+            self.placement_horizon_counter = self.config.tetris.truncate.placement_timer.value.as_i64().unwrap_or(0);
             self.lines = 0;
             self.score = 0;
         }
@@ -683,8 +700,8 @@ pub mod engine {
             self.placed_last = true;
 
             // reset engine state effected by placing pieces
-            self.actions_left = self.config.tetris.decay.actions_until_drop;
-            self.placement_horizon_counter = self.config.tetris.truncate.placement_timer.value;
+            self.actions_left = self.config.tetris.decay.actions_until_drop.as_i64().unwrap_or(0);
+            self.placement_horizon_counter = self.config.tetris.truncate.placement_timer.value.as_i64().unwrap_or(0);
             self.last_actions.clear();
 
             let lines_cleared = self.grid.clear_lines() as u64;
@@ -716,7 +733,7 @@ pub mod engine {
             if action != Action::Down && self.config.tetris.decay.enabled && !self.placed_last {
                 self.actions_left -= 1;
                 if self.actions_left <= 0 {
-                    self.actions_left = self.config.tetris.decay.actions_until_drop;
+                    self.actions_left = self.config.tetris.decay.actions_until_drop.as_i64().unwrap_or(0);
                     if let Ok(new_piece) = self.grid.try_action_down(&self.current_piece) {
                         self.current_piece = new_piece;
                     } else {
@@ -746,15 +763,14 @@ pub mod engine {
 
         fn handle_action_err(&mut self, reason: MovementFailureReason, action: &Action) -> ActionResult {
             if reason == MovementFailureReason::OutOfBounds {
-                match action {
-                    Action::Right => {}
-                    Action::Left => {}
-                    _ => {}
-                }
-            }
+                let result = match action {
+                    Action::Right => ActionResult::HitEdge,
+                    Action::Left => ActionResult::HitEdge,
+                    _ => ActionResult::None,
+                };
+                return result;
+            };
             match action {
-                Action::Right => {}
-                Action::Left => {}
                 Action::Rotate => {
                     if self.grid.try_action_down(&self.current_piece).is_err() {
                         return self.force_place();
@@ -763,15 +779,17 @@ pub mod engine {
                 Action::Down | Action::HardDrop => {
                     return self.force_place();
                 }
+                _ => {}
             }
             ActionResult::None
         }
 
-        pub fn step(&mut self, action: Action) {
+        pub fn step(&mut self, action: Action) -> (State<W, H>, f64, u64, bool, bool) {
             self.placed_last = false;
 
             let lines = self.lines;
             let pre_reward = self.grid.reward_metric(lines as u32);
+            let mut reward = 0f64;
 
             let action_result = match action {
                 Action::Right => self.grid.try_action_right(&self.current_piece),
@@ -791,8 +809,7 @@ pub mod engine {
             self.last_actions.push(action);
 
             self.is_game_over |= result.is_game_over();
-            self.is_truncated |= result.is_placed()
-                && self.config.tetris.truncate.piece_placement_truncates;
+            self.is_truncated |= result.is_placed() && self.config.tetris.truncate.piece_placement_truncates;
 
             let decay_result = self.handle_decay(action);
             if let Ok(decay_result) = decay_result {
@@ -803,58 +820,226 @@ pub mod engine {
 
             let post_reward = self.grid.reward_metric(self.lines as u32);
             let lines_cleared = self.lines - lines;
-            let reward = post_reward - pre_reward;
+            reward += post_reward - pre_reward;
 
+            if self.discouraged_actions.contains(&action) {
+                reward += self.config.tetris.discouraged_actions.reward.as_f64().unwrap_or(0.);
+            }
 
+            if self.encouraged_actions.contains(&action) {
+                reward += self.config.tetris.encouraged_actions.reward.as_f64().unwrap_or(0.);
+            }
+
+            if self.is_game_over {
+                reward += self.config.tetris.states.game_over.as_f64().unwrap_or(0.);
+            }
+
+            self.placement_horizon_counter -= 1;
+            if self.config.tetris.truncate.placement_timer.enabled && self.placement_horizon_counter <= 0 {
+                self.is_truncated = true;
+                reward += self
+                    .config
+                    .tetris
+                    .truncate
+                    .placement_timer
+                    .reward
+                    .as_f64()
+                    .unwrap_or(0.);
+                self.placement_horizon_counter =
+                    self.config.tetris.truncate.placement_timer.value.as_i64().unwrap_or(0);
+            }
+
+            if self.config.tetris.states.cyclic.enabled {
+                if self.last_actions.len() >= 2
+                    && (self.last_actions.ends_with(&[Action::Left, Action::Right])
+                        || self.last_actions.ends_with(&[Action::Right, Action::Left]))
+                {
+                    reward += self.config.tetris.states.cyclic.reward.as_f64().unwrap_or(0.);
+                }
+                let max_rotates = self.config.tetris.states.cyclic.max_rotates.as_i64().unwrap_or(0);
+                if max_rotates > 0 && self.last_actions.len() >= max_rotates as usize {
+                    let all_rotates = self
+                        .last_actions
+                        .iter()
+                        .rev()
+                        .take(max_rotates as usize)
+                        .all(|&action| action == Action::Rotate);
+                    if all_rotates {
+                        reward += self.config.tetris.states.cyclic.reward.as_f64().unwrap_or(0.) * max_rotates as f64;
+                    }
+                }
+            }
+
+            if self.config.tetris.states.edges.enabled && result == ActionResult::HitEdge {
+                reward += self.config.tetris.states.edges.reward.as_f64().unwrap_or(0.);
+            }
+
+            if self.config.tetris.states.early_move.enabled {
+                if self.current_piece.y <= self.config.tetris.states.early_move.cutoff.as_u64().unwrap_or(0) as u32 {
+                    if self.early_move_actions.contains_key(&action) {
+                        reward += self.early_move_actions[&action]
+                            * self
+                                .config
+                                .tetris
+                                .states
+                                .early_move
+                                .diminish_factor
+                                .as_f64()
+                                .unwrap_or(1.);
+                    }
+                } else if self.config.tetris.states.early_move.punishment.punish_late_moves
+                    && self.early_move_actions.contains_key(&action)
+                {
+                    reward -= self.early_move_actions[&action]
+                        * self
+                            .config
+                            .tetris
+                            .states
+                            .early_move
+                            .punishment
+                            .factor
+                            .as_f64()
+                            .unwrap_or(1.);
+                }
+            }
+
+            (
+                self.state(),
+                reward,
+                lines_cleared,
+                self.is_game_over,
+                self.is_truncated,
+            )
         }
 
-        pub fn state(&self) -> (Grid<W, H>, Grid<W, H>) {
+        pub fn state(&self) -> State<W, H> {
             let mut piece_grid = Grid::<W, H>::new();
-            piece_grid.place_piece(&self.current_piece).expect("Shouldn't be possible");
-            (self.grid, piece_grid)
+            piece_grid
+                .place_piece(&self.current_piece)
+                .expect("Shouldn't be possible");
+            State::new(self.grid, piece_grid)
         }
     }
 
-    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-    #[repr(u32)]
-    pub enum Action {
-        Right = 0,
-        Left = 1,
-        Down = 2,
-        Rotate = 3,
-        HardDrop = 4,
+    macro_rules! count {
+        ($($item:tt),* $(,)?) => {
+            <[()]>::len(&[$(count!(@replace $item ())),*])
+        };
+
+        (@replace $_item:tt $replacement:expr) => {
+            $replacement
+        };
     }
 
-    impl From<u32> for Action {
-        fn from(value: u32) -> Self {
-            match value % 5 {
-                0 => Action::Right,
-                1 => Action::Left,
-                2 => Action::Down,
-                3 => Action::Rotate,
-                4 => Action::HardDrop,
-                _ => unreachable!("Invalid action value"),
+    macro_rules! define_action_enums {
+        (
+            $(
+                $variant:ident = $value:expr; $str:literal
+            ),+ $(,)?
+        ) => {
+            #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+            #[repr(u32)]
+            pub enum Action {
+                $(
+                    $variant = $value,
+                )+
+            }
+
+            #[pyclass(from_py_object)]
+            #[repr(u32)]
+            #[derive(Clone)]
+            pub enum PyAction {
+                $(
+                    $variant = $value,
+                )+
+            }
+
+            impl From<PyAction> for Action {
+                fn from(value: PyAction) -> Self {
+                    match value {
+                        $(
+                            PyAction::$variant => Action::$variant,
+                        )+
+                    }
+                }
+            }
+
+            impl From<u32> for Action {
+                fn from(value: u32) -> Self {
+                    match value % count!($($variant),+) as u32 {
+                        $(
+                            $value => Action::$variant,
+                        )+
+                        _ => unreachable!("Invalid action value"),
+                    }
+                }
+            }
+
+            impl From<&str> for Action {
+                fn from(value: &str) -> Self {
+                    match value.to_ascii_uppercase().as_str() {
+                        $(
+                            $str => Action::$variant,
+                        )+
+                        _ => panic!("Invalid action value"),
+                    }
+                }
+            }
+
+        };
+    }
+
+    define_action_enums! {
+        Right = 0; "RIGHT",
+        Left = 1; "LEFT",
+        Down = 2; "DOWN",
+        Rotate = 3; "ROTATE",
+        HardDrop = 4; "HARD_DROP",
+    }
+
+    #[pyclass]
+    pub struct PyTetrisEngine {
+        engine: TetrisEngine<10, 22, rand::rngs::SmallRng>,
+    }
+
+    fn state_to_numpy<'py, const W: usize, const H: usize>(
+        py: Python<'py>,
+        state: State<W, H>,
+    ) -> Bound<'py, PyArray3<u8>> {
+        let mut data = Vec::with_capacity(2 * H * W);
+
+        for grid in [state.board, state.piece] {
+            for y in 0..H {
+                for x in 0..W {
+                    let occupied = (grid.columns[x] >> y) & 1;
+                    data.push(occupied as u8);
+                }
             }
         }
+
+        data.into_pyarray(py).reshape([2, H, W]).unwrap()
     }
 
-    impl From<&str> for Action {
-        fn from(value: &str) -> Self {
-            match value.to_ascii_uppercase().as_str() {
-                "RIGHT" => Action::Right,
-                "LEFT" => Action::Left,
-                "DOWN" => Action::Down,
-                "ROTATE" => Action::Rotate,
-                "HARDDROP" => Action::HardDrop,
-                "HARD_DROP" => Action::HardDrop,
-                _ => panic!("Invalid action value"),
-            }
+    #[pymethods]
+    impl PyTetrisEngine {
+        #[new]
+        pub fn new(seed: u64, config_json: &str) -> PyResult<Self> {
+            let config: types::NNConfig = serde_json::from_str(config_json)
+                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+
+            let rng = rand::rngs::SmallRng::seed_from_u64(seed);
+
+            let engine = TetrisEngine::new(rng, config);
+            Ok(Self { engine })
         }
-    }
 
-    /// Formats the sum of two numbers as string.
-    #[pyfunction]
-    fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-        Ok((a + b).to_string())
+        pub fn step<'py>(
+            &mut self,
+            py: Python<'py>,
+            action: PyAction,
+        ) -> PyResult<(Bound<'py, PyArray3<u8>>, f64, u64, bool, bool)> {
+            let (state, reward, lines_cleared, game_over, truncated) = self.engine.step(Action::from(action));
+            Ok((state_to_numpy(py, state), reward, lines_cleared, game_over, truncated))
+        }
     }
 }

@@ -11,19 +11,19 @@ pub struct NNConfig {
 pub struct Training {
 
 	#[serde(rename = "batchSize")]
-	pub batch_size: i64,
+	pub batch_size: serde_json::Number,
 	pub epoch: Epoch,
 	pub kl: Kl,
 	pub mode: String,
 
 	#[serde(rename = "saveInterval")]
-	pub save_interval: i64,
+	pub save_interval: serde_json::Number,
 	pub shuffle: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Kl {
-	pub kl_cutoff: f64,
+	pub kl_cutoff: serde_json::Number,
 	pub log: bool,
 
 	#[serde(rename = "useEpochLimit")]
@@ -32,7 +32,7 @@ pub struct Kl {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Epoch {
-	pub epochs: i64,
+	pub epochs: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -67,8 +67,8 @@ pub struct Truncate {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlacementTimer {
 	pub enabled: bool,
-	pub reward: i64,
-	pub value: i64,
+	pub reward: serde_json::Number,
+	pub value: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -80,13 +80,13 @@ pub struct States {
 	pub edges: Edges,
 
 	#[serde(rename = "gameOver")]
-	pub game_over: i64,
+	pub game_over: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Edges {
 	pub enabled: bool,
-	pub reward: i64,
+	pub reward: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -94,17 +94,17 @@ pub struct EarlyMove {
 
 	#[serde(rename = "actionsReward")]
 	pub actions_reward: Vec<ActionsRewardItem>,
-	pub cutoff: i64,
+	pub cutoff: serde_json::Number,
 
 	#[serde(rename = "diminishFactor")]
-	pub diminish_factor: f64,
+	pub diminish_factor: serde_json::Number,
 	pub enabled: bool,
 	pub punishment: Punishment,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Punishment {
-	pub factor: f64,
+	pub factor: serde_json::Number,
 
 	#[serde(rename = "punishLateMoves")]
 	pub punish_late_moves: bool,
@@ -113,7 +113,7 @@ pub struct Punishment {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActionsRewardItem {
 	pub name: String,
-	pub reward: f64,
+	pub reward: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -121,42 +121,42 @@ pub struct Cyclic {
 	pub enabled: bool,
 
 	#[serde(rename = "maxRotates")]
-	pub max_rotates: i64,
-	pub reward: i64,
+	pub max_rotates: serde_json::Number,
+	pub reward: serde_json::Number,
 
 	#[serde(rename = "rotateHorizon")]
-	pub rotate_horizon: i64,
+	pub rotate_horizon: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EncouragedActions {
-	pub actions: Vec<String>,
-	pub reward: i64,
+	pub actions: Vec<serde_json::Value>,
+	pub reward: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscouragedActions {
 	pub actions: Vec<serde_json::Value>,
-	pub reward: f64,
+	pub reward: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Decay {
 
 	#[serde(rename = "actionsUntilDrop")]
-	pub actions_until_drop: i64,
+	pub actions_until_drop: serde_json::Number,
 	pub enabled: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Scheduler {
 	pub decay: Vec<DecayItem>,
-	pub patience: i64,
+	pub patience: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DecayItem {
-	pub factor: f64,
+	pub factor: serde_json::Number,
 	pub init: String,
 	pub min: String,
 }
@@ -166,8 +166,8 @@ pub struct Network {
 	pub apa: Apa,
 	pub clipping: Clipping,
 	pub dqn: Dqn,
-	pub dropout: f64,
-	pub gamma: f64,
+	pub dropout: serde_json::Number,
+	pub gamma: serde_json::Number,
 	pub init_lr: InitLr,
 	pub min_lr: MinLr,
 	pub mode: String,
@@ -176,76 +176,76 @@ pub struct Network {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Ppo {
-	pub entropy: f64,
-	pub lamda: i64,
+	pub entropy: serde_json::Number,
+	pub lamda: serde_json::Number,
 
 	#[serde(rename = "minEntropy")]
-	pub min_entropy: f64,
+	pub min_entropy: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MinLr {
 
 	#[serde(rename = "actorLearnRate")]
-	pub actor_learn_rate: f64,
+	pub actor_learn_rate: serde_json::Number,
 
 	#[serde(rename = "convLearnRate")]
-	pub conv_learn_rate: f64,
+	pub conv_learn_rate: serde_json::Number,
 
 	#[serde(rename = "criticLearnRate")]
-	pub critic_learn_rate: f64,
+	pub critic_learn_rate: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InitLr {
 
 	#[serde(rename = "actorLearnRate")]
-	pub actor_learn_rate: f64,
+	pub actor_learn_rate: serde_json::Number,
 
 	#[serde(rename = "convLearnRate")]
-	pub conv_learn_rate: f64,
+	pub conv_learn_rate: serde_json::Number,
 
 	#[serde(rename = "criticLearnRate")]
-	pub critic_learn_rate: f64,
+	pub critic_learn_rate: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Dqn {
-	pub temperature: f64,
+	pub temperature: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Clipping {
-	pub actor_epsilon: f64,
-	pub critic_epsilon: f64,
+	pub actor_epsilon: serde_json::Number,
+	pub critic_epsilon: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Apa {
-	pub entropy: f64,
-	pub lamda: i64,
+	pub entropy: serde_json::Number,
+	pub lamda: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Collection {
 	pub erm: Erm,
-	pub experiences: i64,
+	pub experiences: serde_json::Number,
 
 	#[serde(rename = "maxExperiencesPerTrajectory")]
-	pub max_experiences_per_trajectory: i64,
+	pub max_experiences_per_trajectory: serde_json::Number,
 	pub mode: String,
 
 	#[serde(rename = "parallelEnvs")]
-	pub parallel_envs: i64,
-	pub runs: i64,
+	pub parallel_envs: serde_json::Number,
+	pub runs: serde_json::Number,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Erm {
 	pub enabled: bool,
-	pub length: i64,
+	pub length: serde_json::Number,
 
 	#[serde(rename = "minTrajectories")]
-	pub min_trajectories: i64,
+	pub min_trajectories: serde_json::Number,
 }
 
