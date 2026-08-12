@@ -50,6 +50,18 @@
             pythonImportsCheck = [
               "tetris"
             ];
+
+            buildPhase = ''
+              runHook preBuild
+              maturin build --release --offline --out dist --strip
+              runHook postBuild
+            '';
+
+#            installPhase = ''
+#              runHook preInstall
+#              pip install dist/*.whl --prefix=$out --no-index --no-deps
+#              runHook postInstall
+#            '';
         };
     };
 }

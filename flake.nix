@@ -20,8 +20,9 @@
 
       makePython = torchPackage:
         pkgs.python314.withPackages (pythonPackages: [
-          engine.packages.${system}.default
+          (engine.package pkgs pkgs.python314)
           pythonPackages.pybox2d
+          pythonPackages.mypy
           pythonPackages.numpy
           pythonPackages.matplotlib
           pythonPackages.seaborn
@@ -54,7 +55,7 @@
             ln -sfn ${python}/bin/python3 /opt/compilers/current/python
 
             echo "Python: $(python --version)"
-            zsh
+            exec zsh
           '';
         };
     in

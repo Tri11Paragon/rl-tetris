@@ -5,21 +5,16 @@ import pygame
 import random
 from matplotlib import pyplot as plt
 
-import MaTris.matris
 import apa
 import dqn
 import experience
 import graph
 import ppo2 as ppo
-# import dqn as dqn
 from collections import defaultdict
 import argparse
 import json
-import pickle
-import os
-import subprocess
 
-import MaTris.matris as tetris
+import tetris
 import torch
 from tqdm.auto import tqdm
 from pathlib import Path
@@ -119,8 +114,8 @@ class Runner:
     def log_to_list(self, list_name, value):
         self.run_data[list_name].append(value)
 
-    def tetris_engine(self, name = "engine"):
-        return self.object(name, tetris.Matris(self.config))
+    def tetris_engine(self, name = "engine", seed: int | None = None):
+        return self.object(name, tetris.PyTetrisEngine(seed or time.time_ns(), self.config.json_str))
 
     def tetris_network(self, name = "network", ttype = "ppo"):
         if ttype == "ppo":
@@ -136,16 +131,17 @@ class Runner:
 def test(args):
     runner = Runner(args.file, args.location)
     engine = runner.tetris_engine()
-    network = runner.tetris_network(ttype=runner.config.network.type.lower())
+    network = runner.tetris_network(ttype=runner.config.network.mode.lower())
 
     pygame.init()
-    screen = pygame.display.set_mode((tetris.WIDTH + 512, tetris.HEIGHT))
+    from MaTris import matris
+    screen = pygame.display.set_mode((matris.WIDTH + 512, matris.HEIGHT))
     pygame.display.set_caption("MaTris")
-    visualizer = ppo.NetworkRealtimeVisualizer(screen, pygame.Rect(tetris.WIDTH, 0, 512, tetris.HEIGHT))
+    visualizer = ppo.NetworkRealtimeVisualizer(screen, pygame.Rect(matris.WIDTH, 0, 512, matris.HEIGHT))
 
-    game = tetris.Game()
+    game = matris.Game()
     game.main(screen, engine)
-    game.extra_text.append(f"Training Type: {runner.config.network.type}")
+    game.extra_text.append(f"Training Type: {runner.config.network.mode}")
     game.extra_text.append(f"Steps: {runner.run_data['runs']}")
     game.extra_text.append(f"Timer: {0}")
 
@@ -190,7 +186,7 @@ def test(args):
                 dist = torch.distributions.Categorical(logits=logits)
                 # action = dist.sample().item()
                 action = torch.argmax(logits).item()
-                actions.append(tetris.Action(action))
+                actions.append(action)
 
                 visualizer.update(state, logits.squeeze().cpu(), dist.probs.squeeze().cpu(),
                                   network["state_value"].item() if "state_value" in network else 0, action)
@@ -218,10 +214,10 @@ def test(args):
                 logits = network["action_logits"]
                 dist = torch.distributions.Categorical(logits=logits)
 
-                if "state_value" in network:
-                    print(f"Critic says state is: {network['state_value'].item()} | ", end='')
                 next_state, reward, lines_cleared, game_over, truncated = engine.step(action)
 
+                if "state_value" in network:
+                    print(f"Critic says state is: {network['state_value'].item()} | Advantage: {reward - network['state_value'].item()}| ", end='')
                 print(f"Reward was: {reward}")
                 game.redraw()
                 state = next_state
@@ -230,10 +226,10 @@ def test(args):
 
                 data_dict = {
                     "state": state_tensor.detach().cpu().squeeze(),
-                    "action": torch.tensor(action.value),
+                    "action": torch.tensor(action),
                     "reward": torch.tensor(reward),
                     "done": torch.tensor(is_done),
-                    "logprob": dist.log_prob(torch.tensor(action.value).to(network.device)),
+                    "logprob": dist.log_prob(torch.tensor(action).to(network.device)),
                     "logits": logits.detach().cpu().squeeze(),
                 }
 
@@ -245,8 +241,10 @@ def test(args):
                 if game_over:
                     if "state_value" in network:
                         trajectory.set_last_value(network["state_value"])
+                    print("Game Over")
                     raise SystemExit("Game Over")
-    except (SystemExit, KeyboardInterrupt, MaTris.matris.GameOver):
+    except (SystemExit, KeyboardInterrupt):
+        print("Soft Exit")
         location = runner.make_folder("runs")
         pygame.image.save(screen, location / f"episode.png")
 
@@ -268,10 +266,12 @@ def test(args):
         discounted_returns = graph.plot_rewards_and_discounted_returns(returns, advantages, rewards, runner.config.network.gamma)
         discounted_returns.savefig(location / f"episode_discounted_returns.png")
         plt.close(discounted_returns)
+    except Exception as e:
+        print(e)
 
 def _eval(args):
     runner = Runner(args.file, args.location)
-    network = runner.tetris_network(ttype=runner.config.network.type.lower())
+    network = runner.tetris_network(ttype=runner.config.network.mode.lower())
     engines = [runner.tetris_engine(str(name)) for name in range(args.runs)]
     states = np.array([engine.current_state() for engine in engines])
     finished = [False] * len(engines)
@@ -283,7 +283,7 @@ def _eval(args):
         for i, (engine, action) in enumerate(zip(engines, actions)):
             if finished[i]:
                 continue
-            state, reward, lines_cleared, game_over, truncated = engine.step(MaTris.matris.Action(action))
+            state, reward, lines_cleared, game_over, truncated = engine.step(action)
             states[i] = state
             if game_over:
                 finished[i] = True
@@ -305,7 +305,7 @@ def _eval(args):
 
 def train(args):
     runner = Runner(args.file, args.location)
-    network_type = runner.config.network.type.lower()
+    network_type = runner.config.network.mode.lower()
 
     network = runner.tetris_network(ttype=network_type)
     if network_type == "ppo":

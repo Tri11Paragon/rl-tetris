@@ -11,6 +11,7 @@ ItemNotFound = object()
 
 class DotDict(config_types.NNConfig):
     def __init__(self, mapping):
+        self.json_str = ""
         for k, v in mapping.items():
             if isinstance(v, dict):
                 v = DotDict(v)
@@ -74,4 +75,6 @@ class Config:
             f.write(nix_data["rust"])
 
     def load(self) -> DotDict:
-        return DotDict(self.config)
+        dot = DotDict(self.config)
+        dot.json_str = json.dumps(self.config)
+        return dot

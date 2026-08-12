@@ -17,7 +17,7 @@ pub mod tetris {
     #[pymodule_export]
     pub const MATRIX_WIDTH: usize = 10;
     #[pymodule_export]
-    pub const MATRIX_HEIGHT: usize = 20;
+    pub const MATRIX_HEIGHT: usize = 22;
 
     #[repr(u32)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +285,18 @@ pub mod tetris {
             })
         }
 
+        pub fn as_char(&self) -> char {
+            match self.shape {
+                PieceType::I => 'I',
+                PieceType::O => 'O',
+                PieceType::T => 'T',
+                PieceType::S => 'S',
+                PieceType::Z => 'Z',
+                PieceType::J => 'J',
+                PieceType::L => 'L'
+            }
+        }
+
         pub fn mv(self, dx: i32, dy: i32) -> Self {
             Self {
                 shape: self.shape,
@@ -322,10 +334,14 @@ pub mod tetris {
         pub fn size(self) -> usize {
             PIECE_SHAPES[self.shape as usize].size
         }
+
+        pub fn center(self) -> usize {
+            self.size() / 2
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum MovementFailureReason {
+    pub enum PlacementFailureReason {
         OutOfBounds,
         Collision,
     }
@@ -362,97 +378,86 @@ pub mod tetris {
             }
         }
 
-        pub fn in_bounds(&self, piece: &Piece) -> bool {
-            let shape = piece.get();
-            if piece.x as usize + (shape.largest_width - 1) as usize >= W || piece.y as usize >= H {
-                return false;
-            }
-            if ((shape.largest_height - 1) as i32 + piece.y as i32) as usize >= H {
-                return false;
-            }
-            true
-        }
-
-        pub fn fits(&self, piece: &Piece) -> Result<(), MovementFailureReason> {
-            if !self.in_bounds(piece) {
-                return Err(MovementFailureReason::OutOfBounds);
-            }
-            let shape = piece.get();
-            let mut pos_x = piece.x as usize;
-            let pos_y = piece.y as usize;
-
-            for p_col in shape.columns {
-                if p_col == 0 {
-                    continue;
-                }
-                let p_col = p_col << pos_y;
-                let g_col = self.columns[pos_x];
-                if g_col & p_col != 0 {
-                    return Err(MovementFailureReason::Collision);
-                }
-                pos_x += 1;
-            }
+        pub fn fits(&self, piece: &Piece) -> Result<(), PlacementFailureReason> {
+            let _ = self.blend(piece)?;
             Ok(())
         }
 
-        pub fn blend(&self, piece: &Piece) -> Result<Self, MovementFailureReason> {
-            if !self.in_bounds(piece) {
-                return Err(MovementFailureReason::OutOfBounds);
+        pub fn blend(&self, piece: &Piece) -> Result<Self, PlacementFailureReason> {
+            if piece.size() > 4 {
+                unreachable!();
             }
             let mut grid = *self;
-            let mut pos_x = piece.x as usize;
-            for p_col in piece.get().columns {
-                if p_col == 0 {
-                    continue;
+            let mut pos_x = piece.x as i32 - piece.center() as i32;
+            for p_col in piece.get().columns[0..piece.size()].iter().cloned() {
+                if pos_x < 0 || pos_x >= W as i32 {
+                    if p_col == 0 {
+                        pos_x += 1;
+                        continue;
+                    } else {
+                        return Err(PlacementFailureReason::OutOfBounds);
+                    }
                 }
                 let p_col = p_col << piece.y;
-                let g_col = self.columns[pos_x];
-                if g_col & p_col != 0 {
-                    return Err(MovementFailureReason::Collision);
+                if p_col.bit_width() > H as u32 {
+                    return Err(PlacementFailureReason::OutOfBounds);
                 }
-                grid.columns[pos_x] |= p_col;
-                pos_x += 1
+                let g_col = self.columns[pos_x as usize];
+                if g_col & p_col != 0 {
+                    return Err(PlacementFailureReason::Collision);
+                }
+                grid.columns[pos_x as usize] |= p_col;
+                pos_x += 1;
             }
             Ok(grid)
         }
 
-        pub fn place_piece(&mut self, piece: &Piece) -> Result<(), MovementFailureReason> {
+        pub fn place_piece(&mut self, piece: &Piece) -> Result<(), PlacementFailureReason> {
             *self = self.blend(piece)?;
             Ok(())
         }
 
-        pub fn mv(&self, piece: &Piece, dx: i32, dy: i32) -> Result<Piece, MovementFailureReason> {
+        pub fn mv(&self, piece: &Piece, dx: i32, dy: i32) -> Result<Piece, PlacementFailureReason> {
             let new_piece = piece.mv(dx, dy);
             self.fits(&new_piece)?;
             Ok(new_piece)
         }
 
-        pub fn try_action_down(&self, piece: &Piece) -> Result<Piece, MovementFailureReason> {
-            self.mv(piece, 0, 1)
+        pub fn try_action_down(&self, piece: &Piece) -> Result<Piece, PlacementFailureReason> {
+            let mut new_piece = self.mv(piece, 0, 1)?;
+            new_piece.drop = 1;
+            Ok(new_piece)
         }
 
-        pub fn try_action_left(&self, piece: &Piece) -> Result<Piece, MovementFailureReason> {
+        pub fn try_action_left(&self, piece: &Piece) -> Result<Piece, PlacementFailureReason> {
             self.mv(piece, -1, 0)
         }
 
-        pub fn try_action_right(&self, piece: &Piece) -> Result<Piece, MovementFailureReason> {
+        pub fn try_action_right(&self, piece: &Piece) -> Result<Piece, PlacementFailureReason> {
             self.mv(piece, 1, 0)
         }
 
-        pub fn try_action_rotate(&mut self, piece: &Piece) -> Result<Piece, MovementFailureReason> {
+        pub fn try_action_rotate(&mut self, piece: &Piece) -> Result<Piece, PlacementFailureReason> {
             let new_piece = piece.rotate(1);
             self.fits(&new_piece)?;
             Ok(new_piece)
         }
 
-        pub fn try_action_hard_drop(&self, piece: &Piece) -> Result<Piece, MovementFailureReason> {
-            let mut new_piece = self.try_action_down(piece)?;
+        pub fn try_action_hard_drop(
+            &self, piece: &Piece
+        ) -> Result<Piece, PlacementFailureReason> {
+            let mut new_piece = self.try_action_down(piece).unwrap_or(*piece);
             new_piece.drop = 1;
             while self.fits(&new_piece.mv(0, 1)).is_ok() {
                 new_piece = new_piece.mv(0, 1);
                 new_piece.drop += 1;
             }
             Ok(new_piece)
+        }
+
+        pub fn preview_fall_location(&self, piece: Piece) -> Grid<W, H> {
+            let piece = self.try_action_hard_drop(&piece).unwrap_or(piece);
+            Grid::new().blend(&piece).unwrap_or(*self)
         }
 
         pub fn clear_lines(&mut self) -> u32 {
@@ -698,7 +703,7 @@ pub mod tetris {
             }
         }
 
-        pub fn place_current(&mut self) -> Result<ActionResult, MovementFailureReason> {
+        pub fn place_current(&mut self) -> Result<ActionResult, PlacementFailureReason> {
             // do piece placement
             self.grid.place_piece(&self.current_piece)?;
 
@@ -733,9 +738,10 @@ pub mod tetris {
             self.force_place()
         }
 
-        pub fn handle_decay(&mut self, action: Action) -> Result<ActionResult, MovementFailureReason> {
+        pub fn handle_decay(&mut self, action: Action) -> Result<ActionResult, PlacementFailureReason> {
             // no decay on action down or if the action resulted in a placement.
-            if action != Action::Down && self.config.tetris.decay.enabled && !self.placed_last {
+            if action != Action::Down && action != Action::HardDrop
+                && self.config.tetris.decay.enabled && !self.placed_last {
                 self.actions_left -= 1;
                 if self.actions_left <= 0 {
                     self.actions_left = self.config.tetris.decay.actions_until_drop.as_i64().unwrap_or(0);
@@ -752,8 +758,12 @@ pub mod tetris {
         fn handle_action_ok(&mut self, action: &Action) -> ActionResult {
             match action {
                 Action::HardDrop => {
-                    self.score += self.current_piece.drop as u64;
+                    self.score += self.current_piece.drop as u64 * 2;
                     self.force_place()
+                }
+                Action::Down => {
+                    self.score += 1;
+                    ActionResult::None
                 }
                 Action::Left | Action::Right => {
                     #[allow(clippy::collapsible_match)]
@@ -766,14 +776,14 @@ pub mod tetris {
             }
         }
 
-        fn handle_action_err(&mut self, reason: MovementFailureReason, action: &Action) -> ActionResult {
-            if reason == MovementFailureReason::OutOfBounds {
-                let result = match action {
+        fn handle_action_err(&mut self, reason: PlacementFailureReason, action: &Action) -> ActionResult {
+            let mut result = ActionResult::None;
+            if reason == PlacementFailureReason::OutOfBounds {
+                result = match action {
                     Action::Right => ActionResult::HitEdge,
                     Action::Left => ActionResult::HitEdge,
                     _ => ActionResult::None,
                 };
-                return result;
             };
             match action {
                 Action::Rotate => {
@@ -786,14 +796,15 @@ pub mod tetris {
                 }
                 _ => {}
             }
-            ActionResult::None
+            result
         }
 
         pub fn step(&mut self, action: Action) -> (State<W, H>, f64, u64, bool, bool) {
             self.placed_last = false;
+            self.is_truncated = false;
 
             let lines = self.lines;
-            let pre_reward = self.grid.reward_metric(lines as u32);
+            let pre_reward = self.grid.reward_metric(0);
             let mut reward = 0f64;
 
             let action_result = match action {
@@ -823,8 +834,8 @@ pub mod tetris {
                 panic! {"Decay Action failed: {:?}. This should not be possible.", decay_result}
             }
 
-            let post_reward = self.grid.reward_metric(self.lines as u32);
             let lines_cleared = self.lines - lines;
+            let post_reward = self.grid.reward_metric(lines_cleared as u32);
             reward += post_reward - pre_reward;
 
             if self.discouraged_actions.contains(&action) {
@@ -917,6 +928,10 @@ pub mod tetris {
             )
         }
 
+        pub fn preview_fall_location(&self, piece: Piece) -> Grid<W, H> {
+            self.grid.preview_fall_location(piece)
+        }
+
         pub fn state(&self) -> State<W, H> {
             let mut piece_grid = Grid::<W, H>::new();
             piece_grid
@@ -1007,13 +1022,13 @@ pub mod tetris {
         engine: TetrisEngine<MATRIX_WIDTH, MATRIX_HEIGHT, rand::rngs::SmallRng>,
     }
 
-    fn state_to_numpy<'py, const W: usize, const H: usize>(
+    fn grids_to_numpy<'py, const W: usize, const H: usize>(
         py: Python<'py>,
-        state: State<W, H>,
+        grids: &[Grid<W, H>],
     ) -> Bound<'py, PyArray3<u8>> {
-        let mut data = Vec::with_capacity(2 * H * W);
+        let mut data = Vec::with_capacity(grids.len() * H * W);
 
-        for grid in [state.board, state.piece] {
+        for grid in grids {
             for y in 0..H {
                 for x in 0..W {
                     let occupied = (grid.columns[x] >> y) & 1;
@@ -1022,7 +1037,16 @@ pub mod tetris {
             }
         }
 
-        data.into_pyarray(py).reshape([2, H, W]).unwrap()
+        data.into_pyarray(py)
+            .reshape([grids.len(), H, W])
+            .unwrap()
+    }
+
+    fn state_to_numpy<'py, const W: usize, const H: usize>(
+        py: Python<'py>,
+        state: State<W, H>,
+    ) -> Bound<'py, PyArray3<u8>> {
+        grids_to_numpy(py, &[state.board, state.piece])
     }
 
     #[pymethods]
@@ -1045,6 +1069,46 @@ pub mod tetris {
         ) -> PyResult<(Bound<'py, PyArray3<u8>>, f64, u64, bool, bool)> {
             let (state, reward, lines_cleared, game_over, truncated) = self.engine.step(Action::from(action));
             Ok((state_to_numpy(py, state), reward, lines_cleared, game_over, truncated))
+        }
+
+        pub fn current_state<'py>(
+            &self,
+            py: Python<'py>
+        ) -> PyResult<Bound<'py, PyArray3<u8>>> {
+            Ok(state_to_numpy(py, self.engine.state()))
+        }
+
+        pub fn preview_fall_location<'py>(
+            &self,
+            py: Python<'py>
+        ) -> PyResult<Bound<'py, PyArray3<u8>>> {
+            Ok(grids_to_numpy(py,&[self.engine.preview_fall_location(self.engine.current_piece)]))
+        }
+
+        pub fn reset<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
+            self.engine.reset();
+            Ok(state_to_numpy(py, self.engine.state()))
+        }
+
+        pub fn lines(&self) -> PyResult<u64> {
+            Ok(self.engine.lines)
+        }
+
+        pub fn score(&self) -> PyResult<u64> {
+            Ok(self.engine.score)
+        }
+
+        pub fn print(&self) -> PyResult<()> {
+            self.engine.grid.print();
+            Ok(())
+        }
+
+        pub fn current_piece(&self) -> PyResult<char> {
+            Ok(self.engine.current_piece.as_char())
+        }
+
+        pub fn next_piece(&self) -> PyResult<char> {
+            Ok(self.engine.next_piece.as_char())
         }
     }
 }

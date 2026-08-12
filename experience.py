@@ -1,8 +1,10 @@
+import time
 from collections import namedtuple, defaultdict, deque
+
+import tetris
 from typing import Protocol, Any, Generic, TypeVar, overload, SupportsIndex
 from dataclasses import fields, dataclass
 import numpy as np
-import MaTris.matris as tetris
 from tqdm.auto import tqdm
 import network as net
 import torch
@@ -246,9 +248,10 @@ class DQNExperience(Experience):
 
 class ExperienceGenerator[T: Experience]:
     def __init__(self, config: DotDict, model: net.Network, experience_type: type[T]):
-        self.engines: list[tetris.Matris] = []
+        self.engines: list[tetris.PyTetrisEngine] = []
+        # TODO: seed support.
         for _ in range(config.collection.parallelEnvs):
-            self.engines.append(tetris.Matris(config))
+            self.engines.append(tetris.PyTetrisEngine(time.time_ns(), config.json_str))
         self.model: net.Network = model
         self.config = config
         self.experience_type = experience_type
@@ -267,7 +270,7 @@ class ExperienceGenerator[T: Experience]:
         buffer = ERMBuffer(self.config)
         self.model.eval()
         runs_progress = tqdm(
-            range(self.config.collection.runs) if self.config.collection.type == "runs" else None,
+            range(self.config.collection.runs) if self.config.collection.mode == "runs" else None,
             desc="Runs",
             dynamic_ncols=True,
             leave=False,
@@ -276,7 +279,7 @@ class ExperienceGenerator[T: Experience]:
         for i, engine in enumerate(self.engines):
             self.states[i] = engine.current_state()
         run_iter = runs_progress
-        if self.config.collection.type == "experiences":
+        if self.config.collection.mode == "experiences":
             def nxt():
                 runs_progress.update(1)
                 return not (len(buffer) > self.config.collection.experiences)
@@ -304,7 +307,7 @@ class ExperienceGenerator[T: Experience]:
                 for i in range(self.config.collection.parallelEnvs):
                     if finished[i]:
                         continue
-                    state, reward, lines_cleared, game_over, truncated = self.engines[i].step(tetris.Action(actions[i].item()))
+                    state, reward, lines_cleared, game_over, truncated = self.engines[i].step(int(actions[i].item()))
 
                     is_done = game_over or (truncated and self.config.tetris.truncate.rewardBoundary)
                     should_stop_collection = truncated and self.config.tetris.truncate.stopCollection
@@ -338,7 +341,7 @@ class ExperienceGenerator[T: Experience]:
                         self.trajectories[i] = Trajectory()
 
                         if game_over:
-                            self.lines_cleared.append(self.engines[i].lines)
+                            self.lines_cleared.append(self.engines[i].lines())
                             self.states[i] = self.engines[i].reset()
 
                         finished[i] = game_over or should_stop_collection
@@ -391,7 +394,7 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
 
     def train(self) -> float:
         epochs_progress = tqdm(
-            range(self.config.training.epoch.epochs) if self.config.training.type == "epoch" else None,
+            range(self.config.training.epoch.epochs) if self.config.training.mode == "epoch" else None,
             desc="Epochs",
             dynamic_ncols=True,
             leave=False,
@@ -399,7 +402,7 @@ class NetworkEpochTrainer[T: Experience](net.TrainerType):
         )
 
         loop_iter = epochs_progress
-        if self.config.training.type == "kl":
+        if self.config.training.mode == "kl":
             def up():
                 epochs_progress.update(1)
                 if self.config.training.kl.useEpochLimit and epochs_progress.n > self.config.training.epoch.epochs:
