@@ -46,7 +46,8 @@ class Util:
 
             # GAE: A_t = delta_t + gamma * lambda * mask * A_{t+1}
             # The mask here ensures that we reset the accumulation at episode boundaries
-            gae[t] = delta + gamma * lamda * mask * advantage
+            advantage = delta + gamma * lamda * mask * advantage
+            gae[t] = advantage
 
             # Target return for critic training (Q-estimate)
             returns[t] = gae[t] + state_values[t]
@@ -188,7 +189,7 @@ class PPOExperience(Experience):
         advantages, returns = buffer.compute_gae(config.network.gamma, config.network.ppo.lamda)
 
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        advantages = advantages.clip(-1, 1)
+        # advantages = advantages.clip(-1, 1)
 
         return torch.utils.data.TensorDataset(
             tensors["state"],
@@ -249,24 +250,42 @@ class DQNExperience(Experience):
 class ExperienceGenerator[T: Experience]:
     def __init__(self, config: DotDict, model: net.Network, experience_type: type[T]):
         self.engines: list[tetris.PyTetrisEngine] = []
+        self.games: list[int] = []
+        self.steps: list[int] = []
         # TODO: seed support.
         for _ in range(config.collection.parallelEnvs):
             self.engines.append(tetris.PyTetrisEngine(time.time_ns(), config.json_str))
+            self.games.append(0)
+            self.steps.append(0)
         self.model: net.Network = model
         self.config = config
         self.experience_type = experience_type
         self.experience_fields = fields(experience_type)
         self.field_names = [field.name for field in fields(experience_type)]
-        self.states = self.state_storage()
+        if config.network.expects == "normal":
+            self.states = self.state_storage()
+            self.step_fn = lambda _engine, _action: _engine.step(_action)
+            self.state_fn = lambda _engine: _engine.current_state()
+        elif config.network.expects == "bitwise":
+            self.states = self.state_storage_bitwise()
+            self.step_fn = lambda _engine, _action: _engine.step_bitwise(_action)
+            self.state_fn = lambda _engine: _engine.current_state_bitwise()
+        else:
+            raise ValueError(f"Invalid network expects value '{config.network.expects}'")
         self.trajectories = [Trajectory() for _ in range(self.config.collection.parallelEnvs)]
         self.buffer = ERMBuffer(self.config)
         self.lines_cleared = []
+        self.game_length = []
 
     def state_storage(self):
         return np.ndarray((self.config.collection.parallelEnvs, 2, tetris.MATRIX_HEIGHT, tetris.MATRIX_WIDTH), dtype=np.uint8)
 
+    def state_storage_bitwise(self):
+        return np.ndarray((self.config.collection.parallelEnvs, 2, tetris.MATRIX_WIDTH), dtype=np.uint8)
+
     def generate(self):
         self.lines_cleared = []
+        self.game_length = []
         buffer = ERMBuffer(self.config)
         self.model.eval()
         runs_progress = tqdm(
@@ -276,78 +295,85 @@ class ExperienceGenerator[T: Experience]:
             leave=False,
             position=1
         )
+
         for i, engine in enumerate(self.engines):
-            self.states[i] = engine.current_state()
-        run_iter = runs_progress
+            self.states[i] = self.state_fn(engine)
+            self.games[i] = 0
+        finished = [False] * self.config.collection.parallelEnvs
+
+        should_stop_collection = lambda _i, _truncated, _game_over: runs_progress.n >= self.config.collection.runs
         if self.config.collection.mode == "experiences":
-            def nxt():
-                runs_progress.update(1)
-                return not (len(buffer) > self.config.collection.experiences)
-            run_iter = iter(nxt, False)
-        for _ in run_iter:
-            episode_progress = tqdm(
-                range(self.config.collection.maxExperiencesPerTrajectory),
-                desc="Experiences",
-                dynamic_ncols=True,
-                leave=False,
-                position=2
-            )
-            finished = [False] * self.config.collection.parallelEnvs
-            for _ in episode_progress:
-                state_tensor = torch.Tensor(self.states).to(self.model.device)
+            should_stop_collection = lambda _i, _truncated, _game_over: len(buffer) >= self.config.collection.experiences
+        if self.config.collection.mode == "games":
+            def collect(_i, _truncated, _game_over):
+                if _game_over:
+                    self.games[_i] += 1
+                return self.games[_i] >= self.config.collection.games
+            should_stop_collection = collect
 
-                with torch.no_grad():
-                    self.model(state_tensor)
+        while True:
+            state_tensor = torch.Tensor(self.states).to(self.model.device)
 
-                actions, dist = self.experience_type.distribution(self.config, self.model.get("action_logits"))
-                requires_logprob = "logprob" in self.field_names
+            with torch.no_grad():
+                self.model(state_tensor)
+
+            actions, dist = self.experience_type.distribution(self.config, self.model.get("action_logits"))
+            requires_logprob = "logprob" in self.field_names
+            if requires_logprob:
+                logprob = dist.log_prob(actions).cpu()
+
+            for i in range(self.config.collection.parallelEnvs):
+                if finished[i]:
+                    continue
+                state, reward, lines_cleared, game_over, truncated = self.step_fn(self.engines[i], int(actions[i].item()))
+
+                is_done = game_over or (truncated and self.config.tetris.truncate.rewardBoundary)
+                trajectory_boundary = truncated and self.config.tetris.truncate.stopCollection
+                self.steps[i] += 1
+
+                reward = torch.tensor(reward)
+                done = torch.tensor(int(is_done))
+
+                data_dict = {
+                    "state": state_tensor[i].detach().cpu(),
+                    "action": actions[i].cpu(),
+                    "reward": reward,
+                    "done": done
+                }
+
                 if requires_logprob:
-                    logprob = dist.log_prob(actions).cpu()
+                    data_dict["logprob"] = logprob[i]
 
-                for i in range(self.config.collection.parallelEnvs):
-                    if finished[i]:
-                        continue
-                    state, reward, lines_cleared, game_over, truncated = self.engines[i].step(int(actions[i].item()))
+                if "state_value" in self.field_names:
+                    data_dict["state_value"] = self.model.get("state_value")[i].detach().cpu()
 
-                    is_done = game_over or (truncated and self.config.tetris.truncate.rewardBoundary)
-                    should_stop_collection = truncated and self.config.tetris.truncate.stopCollection
+                if "next_state" in self.field_names:
+                    data_dict["next_state"] = torch.tensor(state)
 
-                    reward = torch.tensor(reward)
-                    done = torch.tensor(int(is_done))
+                self.trajectories[i].append(data_dict)
+                self.states[i] = state
 
-                    data_dict = {
-                        "state": state_tensor[i].detach().cpu(),
-                        "action": actions[i].cpu(),
-                        "reward": reward,
-                        "done": done
-                    }
+                if game_over or trajectory_boundary:
+                    self.trajectories[i].set_last_value(0)  # Value is masked out anyway
+                    buffer.append(self.trajectories[i])
+                    self.trajectories[i] = Trajectory()
 
-                    if requires_logprob:
-                        data_dict["logprob"] = logprob[i]
+                if game_over:
+                    self.lines_cleared.append(self.engines[i].lines())
+                    self.game_length.append(self.steps[i])
+                    self.engines[i].reset()
+                    self.states[i] = self.state_fn(self.engines[i])
+                    self.steps[i] = 0
 
-                    if "state_value" in self.field_names:
-                        data_dict["state_value"] = self.model.get("state_value")[i].detach().cpu()
+                finished[i] = should_stop_collection(i, truncated, game_over)
 
-                    if "next_state" in self.field_names:
-                        data_dict["next_state"] = torch.tensor(state)
+            runs_progress.set_postfix({
+                "experiences": len(buffer)
+            })
+            runs_progress.update(1)
 
-                    self.trajectories[i].append(data_dict)
-                    self.states[i] = state
-
-
-                    if game_over or should_stop_collection:
-                        self.trajectories[i].set_last_value(0) # Value is masked out anyway
-                        buffer.append(self.trajectories[i])
-                        self.trajectories[i] = Trajectory()
-
-                        if game_over:
-                            self.lines_cleared.append(self.engines[i].lines())
-                            self.states[i] = self.engines[i].reset()
-
-                        finished[i] = game_over or should_stop_collection
-
-                if all(finished):
-                    break
+            if all(finished):
+                break
 
         if self.config.collection.erm.enabled:
             self.buffer.join(buffer)

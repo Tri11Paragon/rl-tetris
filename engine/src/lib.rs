@@ -1,3 +1,5 @@
+pub mod macros;
+pub mod pieces;
 #[cfg(test)]
 pub mod test;
 pub mod types;
@@ -7,8 +9,9 @@ use pyo3::prelude::*;
 /// A Python module implemented in Rust.
 #[pymodule]
 pub mod tetris {
-    use super::types;
-    use numpy::{IntoPyArray, PyArray3, PyArrayMethods};
+    use super::pieces::*;
+    use super::{down_decay_placement, pos_offset, types, x_type};
+    use numpy::{IntoPyArray, PyArray2, PyArray3, PyArrayMethods};
     use pyo3::prelude::*;
     use rand::{RngExt, SeedableRng, seq::SliceRandom};
     use std::collections::{HashMap, HashSet};
@@ -19,327 +22,6 @@ pub mod tetris {
     #[pymodule_export]
     pub const MATRIX_HEIGHT: usize = 22;
 
-    #[repr(u32)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum PieceType {
-        I = 0,
-        O = 1,
-        T = 2,
-        S = 3,
-        Z = 4,
-        J = 5,
-        L = 6,
-    }
-
-    #[repr(u32)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum PieceRotation {
-        Zero = 0,
-        One = 1,
-        Two = 2,
-        Three = 3,
-    }
-
-    impl From<u32> for PieceRotation {
-        fn from(value: u32) -> Self {
-            match value % 4 {
-                0 => PieceRotation::Zero,
-                1 => PieceRotation::One,
-                2 => PieceRotation::Two,
-                3 => PieceRotation::Three,
-                _ => unreachable!("Invalid rotation value."),
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct PieceShape {
-        columns: [u32; 4],
-        largest_width: u32,
-        largest_height: u32,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct PieceRotations {
-        shapes: [PieceShape; 4],
-        size: usize,
-    }
-
-    pub static PIECE_SHAPES: [PieceRotations; 7] = [
-        // long
-        PieceRotations {
-            shapes: [
-                PieceShape {
-                    columns: [0b10, 0b10, 0b10, 0b10],
-                    largest_width: 4,
-                    largest_height: 1,
-                },
-                PieceShape {
-                    columns: [0b0, 0b0, 0b1111, 0b0],
-                    largest_width: 1,
-                    largest_height: 4,
-                },
-                PieceShape {
-                    columns: [0b100, 0b100, 0b100, 0b100],
-                    largest_width: 4,
-                    largest_height: 1,
-                },
-                PieceShape {
-                    columns: [0b0, 0b1111, 0b0, 0b0],
-                    largest_width: 1,
-                    largest_height: 4,
-                },
-            ],
-            size: 4,
-        },
-        // square
-        PieceRotations {
-            shapes: [
-                PieceShape {
-                    columns: [0b11, 0b11, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b11, 0b11, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b11, 0b11, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b11, 0b11, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 2,
-                },
-            ],
-            size: 2,
-        },
-        // hat
-        PieceRotations {
-            shapes: [
-                PieceShape {
-                    columns: [0b10, 0b11, 0b10, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b0, 0b111, 0b10, 0b0],
-                    largest_width: 2,
-                    largest_height: 3,
-                },
-                PieceShape {
-                    columns: [0b10, 0b110, 0b10, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b10, 0b111, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 3,
-                },
-            ],
-            size: 3,
-        },
-        // right_snake
-        PieceRotations {
-            shapes: [
-                PieceShape {
-                    columns: [0b10, 0b11, 0b1, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b0, 0b11, 0b110, 0b0],
-                    largest_width: 2,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b100, 0b110, 0b10, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b11, 0b110, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 2,
-                },
-            ],
-            size: 3,
-        },
-        // left_snake
-        PieceRotations {
-            shapes: [
-                PieceShape {
-                    columns: [0b1, 0b11, 0b10, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b0, 0b110, 0b11, 0b0],
-                    largest_width: 2,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b10, 0b110, 0b100, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b110, 0b11, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 2,
-                },
-            ],
-            size: 3,
-        },
-        // left_gun
-        PieceRotations {
-            shapes: [
-                PieceShape {
-                    columns: [0b11, 0b10, 0b10, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b0, 0b111, 0b1, 0b0],
-                    largest_width: 2,
-                    largest_height: 3,
-                },
-                PieceShape {
-                    columns: [0b10, 0b10, 0b110, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b100, 0b111, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 3,
-                },
-            ],
-            size: 3,
-        },
-        // right_gun
-        PieceRotations {
-            shapes: [
-                PieceShape {
-                    columns: [0b10, 0b10, 0b11, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b0, 0b111, 0b100, 0b0],
-                    largest_width: 2,
-                    largest_height: 3,
-                },
-                PieceShape {
-                    columns: [0b110, 0b10, 0b10, 0b0],
-                    largest_width: 3,
-                    largest_height: 2,
-                },
-                PieceShape {
-                    columns: [0b1, 0b111, 0b0, 0b0],
-                    largest_width: 2,
-                    largest_height: 3,
-                },
-            ],
-            size: 3,
-        },
-    ];
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct Piece {
-        shape: PieceType,
-        rotation: PieceRotation,
-        x: u32,
-        y: u32,
-        drop: u32,
-    }
-
-    impl Piece {
-        pub fn new(shape: PieceType) -> Self {
-            Self {
-                shape,
-                rotation: PieceRotation::Zero,
-                x: match PIECE_SHAPES[shape as usize].size {
-                    2 => 4,
-                    _ => 3,
-                },
-                y: 0,
-                drop: 0,
-            }
-        }
-
-        pub fn random_piece<RNG: RngExt>(rng: &mut RNG) -> Self {
-            Self::new(match rng.random_range(0..7) {
-                0 => PieceType::I,
-                1 => PieceType::O,
-                2 => PieceType::T,
-                3 => PieceType::S,
-                4 => PieceType::Z,
-                5 => PieceType::J,
-                _ => PieceType::L,
-            })
-        }
-
-        pub fn as_char(&self) -> char {
-            match self.shape {
-                PieceType::I => 'I',
-                PieceType::O => 'O',
-                PieceType::T => 'T',
-                PieceType::S => 'S',
-                PieceType::Z => 'Z',
-                PieceType::J => 'J',
-                PieceType::L => 'L'
-            }
-        }
-
-        pub fn mv(self, dx: i32, dy: i32) -> Self {
-            Self {
-                shape: self.shape,
-                rotation: self.rotation,
-                x: (self.x as i32 + dx) as u32,
-                y: (self.y as i32 + dy) as u32,
-                drop: self.drop,
-            }
-        }
-
-        pub fn set_rotation(self, new_rotation: PieceRotation) -> Self {
-            Self {
-                shape: self.shape,
-                rotation: new_rotation,
-                x: self.x,
-                y: self.y,
-                drop: self.drop,
-            }
-        }
-
-        pub fn rotate(self, dr: i32) -> Self {
-            Self {
-                shape: self.shape,
-                rotation: PieceRotation::from((self.rotation as i32 + dr) as u32),
-                x: self.x,
-                y: self.y,
-                drop: self.drop,
-            }
-        }
-
-        pub fn get(self) -> &'static PieceShape {
-            &PIECE_SHAPES[self.shape as usize].shapes[self.rotation as usize]
-        }
-
-        pub fn size(self) -> usize {
-            PIECE_SHAPES[self.shape as usize].size
-        }
-
-        pub fn center(self) -> usize {
-            self.size() / 2
-        }
-    }
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum PlacementFailureReason {
         OutOfBounds,
@@ -349,12 +31,6 @@ pub mod tetris {
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub struct Grid<const W: usize, const H: usize> {
         columns: [u32; W],
-    }
-
-    impl Default for Grid<10, 22> {
-        fn default() -> Self {
-            Self::new()
-        }
     }
 
     impl<const W: usize, const H: usize> Grid<W, H> {
@@ -384,22 +60,44 @@ pub mod tetris {
         }
 
         pub fn blend(&self, piece: &Piece) -> Result<Self, PlacementFailureReason> {
-            if piece.size() > 4 {
-                unreachable!();
-            }
+            // if piece.size() > 4 {
+            //     unreachable!();
+            // }
+            // let mut grid = *self;
+            // let mut pos_x = piece.x as i32 - piece.center() as i32;
+            // for p_col in piece.get().columns[0..piece.size()].iter().cloned() {
+            //     if pos_x < 0 || pos_x >= W as i32 {
+            //         if p_col == 0 {
+            //             pos_x += 1;
+            //             continue;
+            //         } else {
+            //             return Err(PlacementFailureReason::OutOfBounds);
+            //         }
+            //     }
+            //     let p_col = p_col << piece.y;
+            //     if p_col.bit_width() > H as u32 {
+            //         return Err(PlacementFailureReason::OutOfBounds);
+            //     }
+            //     let g_col = self.columns[pos_x as usize];
+            //     if g_col & p_col != 0 {
+            //         return Err(PlacementFailureReason::Collision);
+            //     }
+            //     grid.columns[pos_x as usize] |= p_col;
+            //     pos_x += 1;
+            // }
+            // Ok(grid)
             let mut grid = *self;
-            let mut pos_x = piece.x as i32 - piece.center() as i32;
-            for p_col in piece.get().columns[0..piece.size()].iter().cloned() {
-                if pos_x < 0 || pos_x >= W as i32 {
-                    if p_col == 0 {
-                        pos_x += 1;
-                        continue;
-                    } else {
-                        return Err(PlacementFailureReason::OutOfBounds);
-                    }
+            if piece.x >= W as x_type!() {
+                return Err(PlacementFailureReason::OutOfBounds);
+            }
+            let pos_x = piece.x as i32;
+            let pos_x = pos_x .. pos_x + piece.size() as i32;
+            for (p_col, pos_x) in piece.get().columns[0..piece.size()].iter().cloned().zip(pos_x) {
+                if p_col == 0 {
+                    continue;
                 }
                 let p_col = p_col << piece.y;
-                if p_col.bit_width() > H as u32 {
+                if pos_x < 0 || pos_x >= W as i32 || p_col.bit_width() > H as u32 {
                     return Err(PlacementFailureReason::OutOfBounds);
                 }
                 let g_col = self.columns[pos_x as usize];
@@ -407,7 +105,7 @@ pub mod tetris {
                     return Err(PlacementFailureReason::Collision);
                 }
                 grid.columns[pos_x as usize] |= p_col;
-                pos_x += 1;
+
             }
             Ok(grid)
         }
@@ -437,15 +135,24 @@ pub mod tetris {
             self.mv(piece, 1, 0)
         }
 
-        pub fn try_action_rotate(&mut self, piece: &Piece) -> Result<Piece, PlacementFailureReason> {
+        pub fn try_action_rotate(&self, piece: &Piece) -> Result<Piece, PlacementFailureReason> {
             let new_piece = piece.rotate(1);
-            self.fits(&new_piece)?;
-            Ok(new_piece)
+            let first_result = self.fits(&new_piece);
+            if first_result.is_ok() {
+                return Ok(new_piece);
+            }
+            let new_piece = piece.mv(1, 0).rotate(1);
+            if self.fits(&new_piece).is_ok() {
+                return Ok(new_piece);
+            }
+            let new_piece = piece.mv(-1, 0).rotate(1);
+            if self.fits(&new_piece).is_ok() {
+                return Ok(new_piece);
+            }
+            Err(first_result.err().unwrap())
         }
 
-        pub fn try_action_hard_drop(
-            &self, piece: &Piece
-        ) -> Result<Piece, PlacementFailureReason> {
+        pub fn try_action_hard_drop(&self, piece: &Piece) -> Result<Piece, PlacementFailureReason> {
             let mut new_piece = self.try_action_down(piece).unwrap_or(*piece);
             new_piece.drop = 1;
             while self.fits(&new_piece.mv(0, 1)).is_ok() {
@@ -484,7 +191,8 @@ pub mod tetris {
                         new_col |= 1u32 << dst_y;
                     }
 
-                    dst_y -= 1;
+                    // dst_y -= 1;
+                    dst_y = dst_y.saturating_sub(1);
                 }
 
                 *col = new_col;
@@ -494,12 +202,13 @@ pub mod tetris {
         }
 
         pub fn compute_heights_holes(&self) -> ([u32; W], u32) {
+            let unnatural_zeros: u32 = 32 - H as u32;
             let mut heights = [0; W];
             let mut holes = 0;
             for (i, col) in self.columns.iter().enumerate() {
-                let trailing_zeros = col.trailing_zeros();
-                heights[i] = trailing_zeros;
-                holes += col.count_zeros() - trailing_zeros;
+                let trailing_zeros = std::cmp::min(col.trailing_zeros(), H as u32);
+                heights[i] = H as u32 - trailing_zeros;
+                holes += col.count_zeros() - unnatural_zeros - trailing_zeros;
             }
             (heights, holes)
         }
@@ -522,12 +231,14 @@ pub mod tetris {
         pub fn brett_reward_metric(&self, lines: u32) -> f64 {
             let (heights, holes, bumps) = self.compute_height_holes_bumps();
             let aggregate_height = heights.iter().sum::<u32>() as f64;
-            let max_height = unsafe { *heights.iter().max().unwrap_unchecked() } as f64;
+            let max_height = *heights.iter().max().unwrap();
+            // println!("max_height: {}, heights: {:?}, aggregate_height: {}, holes: {}, bumps: {}", max_height,
+            //          heights, aggregate_height, holes, bumps);
             -0.510066 * aggregate_height
-                + (0.760666 * 16.) * (lines * lines) as f64
-                + -(0.35663 * 4.) * holes
+                + (0.760666 * 4.) * (lines * lines) as f64
+                + -(0.35663 * 3.) * holes
                 + -0.184483 * bumps
-                + -0.1 * max_height
+                + -0.1 * max_height as f64
         }
 
         pub fn reward_metric(&self, lines: u32) -> f64 {
@@ -535,40 +246,26 @@ pub mod tetris {
         }
     }
 
-    pub static PIECE_TYPES: [PieceType; 7] = [
-        PieceType::I,
-        PieceType::O,
-        PieceType::T,
-        PieceType::S,
-        PieceType::Z,
-        PieceType::J,
-        PieceType::L,
-    ];
-
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub struct BagOfPieces {
         pieces: [PieceType; 7],
         index: usize,
     }
 
-    impl Default for BagOfPieces {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
     impl BagOfPieces {
-        pub fn new() -> Self {
-            Self {
+        pub fn new(rng: &mut impl RngExt) -> Self {
+            let mut beep = Self {
                 pieces: PIECE_TYPES,
                 index: 0,
-            }
+            };
+            // beep.pieces.shuffle(rng);
+            beep
         }
 
         pub fn next_piece(&mut self, rng: &mut impl RngExt) -> Piece {
             if self.index >= self.pieces.len() {
                 self.index = 0;
-                self.pieces.shuffle(rng);
+                // self.pieces.shuffle(rng);
             }
             let piece = self.pieces[self.index];
             self.index += 1;
@@ -613,7 +310,6 @@ pub mod tetris {
         None,
         Placed,
         HitEdge,
-        OverRotated,
         GameOver,
     }
 
@@ -632,7 +328,7 @@ pub mod tetris {
 
     impl<const W: usize, const H: usize, RNG: SeedableRng + RngExt> TetrisEngine<W, H, RNG> {
         pub fn new(mut rng: RNG, config: types::NNConfig) -> Self {
-            let mut bag = BagOfPieces::new();
+            let mut bag = BagOfPieces::new(&mut rng);
 
             let mut discouraged_actions = HashSet::new();
             let mut encouraged_actions = HashSet::new();
@@ -676,6 +372,7 @@ pub mod tetris {
 
         pub fn reset(&mut self) {
             self.grid = Grid::new();
+            self.bag = BagOfPieces::new(&mut self.rng);
             self.current_piece = self.bag.next_piece(&mut self.rng);
             self.next_piece = self.bag.next_piece(&mut self.rng);
             self.last_actions.clear();
@@ -723,10 +420,12 @@ pub mod tetris {
                 return Ok(ActionResult::GameOver);
             }
 
-            Ok(ActionResult::None)
+            Ok(ActionResult::Placed)
         }
 
         pub fn force_place(&mut self) -> ActionResult {
+            // the panic won't happen as pieces are always checked before move
+            // if it does happen this should crash as it is a hard bug.
             self.place_current()
                 .expect("Piece placement failed on down move. This should not be possible.")
         }
@@ -740,13 +439,17 @@ pub mod tetris {
 
         pub fn handle_decay(&mut self, action: Action) -> Result<ActionResult, PlacementFailureReason> {
             // no decay on action down or if the action resulted in a placement.
-            if action != Action::Down && action != Action::HardDrop
-                && self.config.tetris.decay.enabled && !self.placed_last {
+            if action != Action::Down
+                && action != Action::HardDrop
+                && self.config.tetris.decay.enabled
+                && !self.placed_last
+            {
                 self.actions_left -= 1;
                 if self.actions_left <= 0 {
                     self.actions_left = self.config.tetris.decay.actions_until_drop.as_i64().unwrap_or(0);
                     if let Ok(new_piece) = self.grid.try_action_down(&self.current_piece) {
                         self.current_piece = new_piece;
+                        down_decay_placement!(self, Ok);
                     } else {
                         return self.place_current();
                     }
@@ -763,6 +466,7 @@ pub mod tetris {
                 }
                 Action::Down => {
                     self.score += 1;
+                    down_decay_placement!(self);
                     ActionResult::None
                 }
                 Action::Left | Action::Right => {
@@ -772,7 +476,10 @@ pub mod tetris {
                     }
                     ActionResult::None
                 }
-                _ => ActionResult::None,
+                _ => {
+                    down_decay_placement!(self);
+                    ActionResult::None
+                },
             }
         }
 
@@ -831,6 +538,7 @@ pub mod tetris {
             if let Ok(decay_result) = decay_result {
                 self.is_game_over |= decay_result.is_game_over();
             } else if let Err(decay_result) = decay_result {
+                // intentional, effectively unreachable.
                 panic! {"Decay Action failed: {:?}. This should not be possible.", decay_result}
             }
 
@@ -881,7 +589,15 @@ pub mod tetris {
                         .take(max_rotates as usize)
                         .all(|&action| action == Action::Rotate);
                     if all_rotates {
-                        reward += self.config.tetris.states.cyclic.reward.as_f64().unwrap_or(0.) * max_rotates as f64;
+                        let rotate_iter = self.last_actions.iter().rev().skip(max_rotates as
+                            usize).take(self.config.tetris.states.cyclic.rotate_horizon.as_u64()
+                            .unwrap_or(4) as usize - max_rotates as usize);
+                        for action in rotate_iter {
+                            if *action != Action::Rotate {
+                                break;
+                            }
+                            reward += self.config.tetris.states.cyclic.reward.as_f64().unwrap_or(0.);
+                        }
                     }
                 }
             }
@@ -893,15 +609,17 @@ pub mod tetris {
             if self.config.tetris.states.early_move.enabled {
                 if self.current_piece.y <= self.config.tetris.states.early_move.cutoff.as_u64().unwrap_or(0) as u32 {
                     if self.early_move_actions.contains_key(&action) {
-                        reward += self.early_move_actions[&action]
-                            * self
-                                .config
-                                .tetris
-                                .states
-                                .early_move
-                                .diminish_factor
-                                .as_f64()
-                                .unwrap_or(1.);
+                        let factor = self.current_piece.x as f64;
+                        let diminish_factor = self
+                            .config
+                            .tetris
+                            .states
+                            .early_move
+                            .diminish_factor
+                            .as_f64()
+                            .unwrap_or(1.)
+                            .powf((factor - pos_offset!()).abs());
+                        reward += self.early_move_actions[&action] * diminish_factor;
                     }
                 } else if self.config.tetris.states.early_move.punishment.punish_late_moves
                     && self.early_move_actions.contains_key(&action)
@@ -934,6 +652,7 @@ pub mod tetris {
 
         pub fn state(&self) -> State<W, H> {
             let mut piece_grid = Grid::<W, H>::new();
+            // this will literally never fail as piece_grid is empty.
             piece_grid
                 .place_piece(&self.current_piece)
                 .expect("Shouldn't be possible");
@@ -1001,6 +720,7 @@ pub mod tetris {
                         $(
                             $str => Action::$variant,
                         )+
+                        // we need to panic if the user provides an invalid type.
                         _ => panic!("Invalid action value"),
                     }
                 }
@@ -1025,28 +745,48 @@ pub mod tetris {
     fn grids_to_numpy<'py, const W: usize, const H: usize>(
         py: Python<'py>,
         grids: &[Grid<W, H>],
-    ) -> Bound<'py, PyArray3<u8>> {
+    ) -> Bound<'py, PyArray3<f32>> {
         let mut data = Vec::with_capacity(grids.len() * H * W);
 
         for grid in grids {
             for y in 0..H {
                 for x in 0..W {
                     let occupied = (grid.columns[x] >> y) & 1;
-                    data.push(occupied as u8);
+                    data.push(occupied as f32);
                 }
             }
         }
 
-        data.into_pyarray(py)
-            .reshape([grids.len(), H, W])
-            .unwrap()
+        data.into_pyarray(py).reshape([grids.len(), H, W]).unwrap()
+    }
+
+    fn grids_to_bitwise_numpy<'py, const W: usize, const H: usize>(
+        py: Python<'py>,
+        grids: &[Grid<W, H>],
+    ) -> Bound<'py, PyArray2<u32>> {
+        let mut data = Vec::with_capacity(grids.len() * W);
+
+        for grid in grids {
+            for x in 0..W {
+                data.push(grid.columns[x]);
+            }
+        }
+
+        data.into_pyarray(py).reshape([grids.len(), W]).unwrap()
     }
 
     fn state_to_numpy<'py, const W: usize, const H: usize>(
         py: Python<'py>,
         state: State<W, H>,
-    ) -> Bound<'py, PyArray3<u8>> {
+    ) -> Bound<'py, PyArray3<f32>> {
         grids_to_numpy(py, &[state.board, state.piece])
+    }
+
+    fn state_to_bitwise_numpy<'py, const W: usize, const H: usize>(
+        py: Python<'py>,
+        state: State<W, H>,
+    ) -> Bound<'py, PyArray2<u32>> {
+        grids_to_bitwise_numpy(py, &[state.board, state.piece])
     }
 
     #[pymethods]
@@ -1066,28 +806,45 @@ pub mod tetris {
             &mut self,
             py: Python<'py>,
             action: u32,
-        ) -> PyResult<(Bound<'py, PyArray3<u8>>, f64, u64, bool, bool)> {
+        ) -> PyResult<(Bound<'py, PyArray3<f32>>, f64, u64, bool, bool)> {
             let (state, reward, lines_cleared, game_over, truncated) = self.engine.step(Action::from(action));
             Ok((state_to_numpy(py, state), reward, lines_cleared, game_over, truncated))
         }
 
-        pub fn current_state<'py>(
-            &self,
-            py: Python<'py>
-        ) -> PyResult<Bound<'py, PyArray3<u8>>> {
+        pub fn step_bitwise<'py>(
+            &mut self,
+            py: Python<'py>,
+            action: u32,
+        ) -> PyResult<(Bound<'py, PyArray2<u32>>, f64, u64, bool, bool)> {
+            let (state, reward, lines_cleared, game_over, truncated) = self.engine.step(Action::from(action));
+            Ok((
+                state_to_bitwise_numpy(py, state),
+                reward,
+                lines_cleared,
+                game_over,
+                truncated,
+            ))
+        }
+
+        pub fn current_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<f32>>> {
             Ok(state_to_numpy(py, self.engine.state()))
         }
 
-        pub fn preview_fall_location<'py>(
-            &self,
-            py: Python<'py>
-        ) -> PyResult<Bound<'py, PyArray3<u8>>> {
-            Ok(grids_to_numpy(py,&[self.engine.preview_fall_location(self.engine.current_piece)]))
+        pub fn current_state_bitwise<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
+            Ok(state_to_bitwise_numpy(py, self.engine.state()))
         }
 
-        pub fn reset<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
+        // Only used for rendering debug info.
+        pub fn preview_fall_location<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<f32>>> {
+            Ok(grids_to_numpy(
+                py,
+                &[self.engine.preview_fall_location(self.engine.current_piece)],
+            ))
+        }
+
+        pub fn reset(&mut self) -> PyResult<()> {
             self.engine.reset();
-            Ok(state_to_numpy(py, self.engine.state()))
+            Ok(())
         }
 
         pub fn lines(&self) -> PyResult<u64> {

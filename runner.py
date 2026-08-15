@@ -6,6 +6,7 @@ import random
 from matplotlib import pyplot as plt
 
 import apa
+import bitwise
 import dqn
 import experience
 import graph
@@ -34,6 +35,9 @@ parser_evaler.add_argument("--runs", type=int, default=100)
 
 parser_tester = subparsers.add_parser("test")
 parser_tester.add_argument("file", type=str)
+
+parser_compare = subparsers.add_parser("compare")
+parser_compare.add_argument("file", type=str)
 
 parser_trainer = subparsers.add_parser("train")
 parser_trainer.add_argument("file", type=str)
@@ -117,21 +121,33 @@ class Runner:
     def tetris_engine(self, name = "engine", seed: int | None = None):
         return self.object(name, tetris.PyTetrisEngine(seed or time.time_ns(), self.config.json_str))
 
-    def tetris_network(self, name = "network", ttype = "ppo"):
-        if ttype == "ppo":
-            return self.object(name, ppo.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
-        elif ttype == "apa":
-            return self.object(name, ppo.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
-        elif ttype == "dqn":
-            return self.object(name, dqn.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
-        else:
-            raise TypeError(f"Invalid type '{ttype}'")
+    def tetris_network(self, name = "network", ttype = "ppo", expects = "normal"):
+        if expects == "normal":
+            if ttype == "ppo":
+                return self.object(name, ppo.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
+            elif ttype == "apa":
+                return self.object(name, ppo.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
+            elif ttype == "dqn":
+                return self.object(name, dqn.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
+            else:
+                raise TypeError(f"Invalid type '{ttype}'")
+        elif expects == "bitwise":
+            if ttype == "ppo":
+                return self.object(name, bitwise.network(self.config).load(self.folder / f"{name}.pt"))
+            elif ttype == "apa":
+                return self.object(name, bitwise.network(self.config).load(self.folder / f"{name}.pt"))
+            elif ttype == "dqn":
+                print("WARNING BITWISE UNDEFINED FOR DQN CURRENTLY")
+                return self.object(name, dqn.AdjustedSandfordNetwork(self.config).load(self.folder / f"{name}.pt"))
+            else:
+                raise TypeError(f"Invalid type '{ttype}'")
+        raise ValueError(f"Invalid network expects value '{expects}'")
 
 
 def test(args):
     runner = Runner(args.file, args.location)
-    engine = runner.tetris_engine()
-    network = runner.tetris_network(ttype=runner.config.network.mode.lower())
+    engine: tetris.PyTetrisEngine = runner.tetris_engine()
+    network = runner.tetris_network(ttype=runner.config.network.mode.lower(), expects=runner.config.network.expects.lower())
 
     pygame.init()
     from MaTris import matris
@@ -145,7 +161,13 @@ def test(args):
     game.extra_text.append(f"Steps: {runner.run_data['runs']}")
     game.extra_text.append(f"Timer: {0}")
 
-    state = engine.reset()
+    engine.reset()
+    if runner.config.network.expects == "normal":
+        state = engine.current_state()
+    elif runner.config.network.expects == "bitwise":
+        state = engine.current_state_bitwise()
+    else:
+        raise ValueError(f"Invalid value for network.expects: {runner.config.network.expects}")
     network.eval()
 
     run = False
@@ -189,7 +211,7 @@ def test(args):
                 actions.append(action)
 
                 visualizer.update(state, logits.squeeze().cpu(), dist.probs.squeeze().cpu(),
-                                  network["state_value"].item() if "state_value" in network else 0, action)
+                                  network["state_value"].item() if "state_value" in network else 0, action, runner.config.network.expects)
 
             if pygame.K_EQUALS in game.extra_keys or pygame.K_KP_PLUS in game.extra_keys:
                 timer += 0.01
@@ -199,8 +221,8 @@ def test(args):
             timer = max(0, timer)
             game.extra_text[2] = f"Timer: {timer:.2f}"
 
-            if best and not run:
-                actions.extend(engine.best_action_set())
+            # if best and not run:
+            #     actions.extend(engine.best_action_set())
 
             if len(actions) == 0:
                 game.redraw()
@@ -214,7 +236,13 @@ def test(args):
                 logits = network["action_logits"]
                 dist = torch.distributions.Categorical(logits=logits)
 
-                next_state, reward, lines_cleared, game_over, truncated = engine.step(action)
+                if runner.config.network.expects == "normal":
+                    next_state, reward, lines_cleared, game_over, truncated = engine.step(action)
+                elif runner.config.network.expects == "bitwise":
+                    next_state, reward, lines_cleared, game_over, truncated = engine.step_bitwise(action)
+                else:
+                    raise ValueError(f"Invalid value for network.expects: {runner.config.network.expects}")
+                # print(engine.current_state_bitwise())
 
                 if "state_value" in network:
                     print(f"Critic says state is: {network['state_value'].item()} | Advantage: {reward - network['state_value'].item()}| ", end='')
@@ -242,7 +270,9 @@ def test(args):
                     if "state_value" in network:
                         trajectory.set_last_value(network["state_value"])
                     print("Game Over")
-                    raise SystemExit("Game Over")
+                    engine.reset()
+                    state = engine.current_state()
+                    # raise SystemExit("Game Over")
     except (SystemExit, KeyboardInterrupt):
         print("Soft Exit")
         location = runner.make_folder("runs")
@@ -253,6 +283,7 @@ def test(args):
         returns = returns.detach()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         advantages = advantages.detach()
+        dones = torch.stack(trajectory.buffer["done"])
 
         logits = torch.stack(trajectory["logits"])
         rewards = torch.stack(trajectory["reward"])
@@ -263,11 +294,64 @@ def test(args):
         episode_action_probs = graph.plot_episode_action_probabilities(logits, returns)
         episode_action_probs.savefig(location / f"episode_action_probs_seperate.png")
         plt.close(episode_action_probs)
-        discounted_returns = graph.plot_rewards_and_discounted_returns(returns, advantages, rewards, runner.config.network.gamma)
+        discounted_returns = graph.plot_rewards_and_discounted_returns(returns, advantages, rewards, dones, runner.config.network.gamma)
         discounted_returns.savefig(location / f"episode_discounted_returns.png")
         plt.close(discounted_returns)
     except Exception as e:
         print(e)
+
+def compare(args):
+    from MaTris import matris
+    from MaTris.matris import Action
+    runner = Runner(args.file, args.location)
+    tetris_engine: tetris.PyTetrisEngine = tetris.PyTetrisEngine(0, runner.config.json_str)
+    matris_engine = matris.Matris(runner.config)
+
+    pygame.init()
+    screen = pygame.display.set_mode((512 * 2, matris.HEIGHT))
+    pygame.display.set_caption("MaTris")
+    visualizer = ppo.NetworkRealtimeVisualizer(screen, pygame.Rect(256, 0, 512, matris.HEIGHT))
+    visualizer2 = ppo.NetworkRealtimeVisualizer(screen, pygame.Rect(0, 0, 512, matris.HEIGHT))
+
+    steps = 0
+
+    while True:
+        pygame.event.get(pygame.KEYDOWN)
+        keyups = pygame.event.get(pygame.KEYUP)
+
+        actions = []
+        for event in keyups:
+            if event.key == pygame.K_SPACE:
+                actions.append(Action.HARD_DROP.value)
+            elif event.key == pygame.K_UP or event.key == pygame.K_w:
+                actions.append(Action.ROTATE.value)
+            elif event.key == pygame.K_LEFT or event.key == pygame.K_a:
+                actions.append(Action.LEFT.value)
+            elif event.key == pygame.K_RIGHT or event.key == pygame.K_d:
+                actions.append(Action.RIGHT.value)
+            elif event.key == pygame.K_DOWN or event.key == pygame.K_s:
+                actions.append(Action.DOWN.value)
+            elif event.key == pygame.K_ESCAPE:
+                raise SystemExit("Game Over")
+
+        for action in actions:
+            steps += 1
+            matris_tuple = matris_engine.step(action)
+            tetris_tuple = tetris_engine.step(action)
+
+            import engine_benchmark as bench
+
+            if not bench.validate_tuple(action, tetris_tuple, matris_tuple, should_exit=False):
+                print(f"Failed after {steps} steps")
+            visualizer2.update(tetris_tuple[0], None, None, None, None, runner.config.network.expects)
+            visualizer.update(matris_tuple[0], None, None, None, None, runner.config.network.expects)
+            pygame.display.flip()
+
+            if matris_tuple[3]:
+                matris_engine.reset()
+            if tetris_tuple[3]:
+                tetris_engine.reset()
+
 
 def _eval(args):
     runner = Runner(args.file, args.location)
@@ -307,7 +391,7 @@ def train(args):
     runner = Runner(args.file, args.location)
     network_type = runner.config.network.mode.lower()
 
-    network = runner.tetris_network(ttype=network_type)
+    network = runner.tetris_network(ttype=network_type, expects=runner.config.network.expects.lower())
     if network_type == "ppo":
         experience_type = PPOExperience
         step_function = ppo.step
@@ -319,7 +403,7 @@ def train(args):
     elif network_type == "dqn":
         experience_type = DQNExperience
         step_function = dqn.step
-        target = runner.tetris_network("target", ttype=network_type)
+        target = runner.tetris_network("target", ttype=network_type, expects=runner.config.network.expects.lower())
         networks = {"network": network, "target": target}
     else:
         raise TypeError(f"Invalid type '{network_type}'")
@@ -341,7 +425,9 @@ def train(args):
             traj_returns = generator.buffer.compute_returns(runner.config.network.gamma)
             runner.run_data["average_trajectory_return"].append(float(traj_returns.mean()))
             lines_cleared = np.array(generator.lines_cleared)
+            game_length = np.array(generator.game_length)
             runner.run_data["average_lines_cleared"].append(float(lines_cleared.mean()) if len(generator.lines_cleared) > 0 else 0)
+            runner.run_data["average_game_length"].append(float(game_length.mean()) if len(generator.game_length) > 0 else 0)
             runner.increment_runs()
             progress.update(1)
             # progress.set_postfix({
@@ -374,6 +460,8 @@ def main():
         test(args)
     elif args.command == "train":
         train(args)
+    elif args.command == "compare":
+        compare(args)
     elif args.command == "eval":
         _eval(args)
     elif args.command == "init":

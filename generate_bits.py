@@ -1,3 +1,4 @@
+import MaTris.tetrominoes
 import MaTris.tetrominoes as tet
 
 def trailing_zeros(n: int) -> int:
@@ -34,22 +35,21 @@ def rotate_columns_clockwise(bitfield_columns):
 
 def main():
     for k, v in tet.tetrominoes.items():
-        bitfield_columns = [0] * len(v.shape)
-        idx = 0
-        for row in v.shape:
-            for column, data in enumerate(row):
-                val = 0 if data is None else 1
-                bitfield_columns[column] |= val << idx
-            idx += 1
         print()
         print(f"// {k}")
         print("PieceRotations {")
         print("shapes: [")
         for i in range(4):
+            bitfield_columns = [0] * len(v.shape)
+            idx = 0
+            for row in MaTris.tetrominoes.rotate(v.shape, i):
+                for column, data in enumerate(row):
+                    val = 0 if data is None else 1
+                    bitfield_columns[column] |= val << idx
+                idx += 1
             print_cols(bitfield_columns)
-            bitfield_columns = rotate_columns_clockwise(bitfield_columns)
         print("],")
-        print(f"size: {len(bitfield_columns)}")
+        print(f"size: {len(v.shape)}")
         print("},")
 
 if __name__ == "__main__":

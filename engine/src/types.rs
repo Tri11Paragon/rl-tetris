@@ -167,6 +167,7 @@ pub struct Network {
 	pub clipping: Clipping,
 	pub dqn: Dqn,
 	pub dropout: serde_json::Number,
+	pub expects: String,
 	pub gamma: serde_json::Number,
 	pub init_lr: InitLr,
 	pub min_lr: MinLr,
@@ -230,6 +231,7 @@ pub struct Apa {
 pub struct Collection {
 	pub erm: Erm,
 	pub experiences: serde_json::Number,
+	pub games: serde_json::Number,
 
 	#[serde(rename = "maxExperiencesPerTrajectory")]
 	pub max_experiences_per_trajectory: serde_json::Number,

@@ -54,7 +54,7 @@ def plot_episode_action_probabilities(logits: torch.Tensor, returns: torch.Tenso
 
     return fig
 
-def plot_rewards_and_discounted_returns(returns: torch.Tensor, advantages: torch.Tensor, rewards: torch.Tensor, gamma=None):
+def plot_rewards_and_discounted_returns(returns: torch.Tensor, advantages: torch.Tensor, rewards: torch.Tensor, dones: torch.Tensor, gamma=None):
     T = min(returns.shape[0], rewards.shape[0], advantages.shape[0])
     if T == 0:
         raise ValueError("Inputs are empty after conversion.")
@@ -63,6 +63,7 @@ def plot_rewards_and_discounted_returns(returns: torch.Tensor, advantages: torch
     returns = returns[:T]
     advantages = advantages[:T]
     timesteps = np.arange(T)
+    done_timesteps = timesteps[np.asarray(dones) == 1]
 
     # Create figure with two subplots
     fig, (ax2, ax3, ax1) = plt.subplots(3, 1, figsize=(12, 10))
@@ -72,80 +73,36 @@ def plot_rewards_and_discounted_returns(returns: torch.Tensor, advantages: torch
     ax2.set_ylabel("Discounted Return")
     ax2.set_xlabel("Timestep")
     ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="upper right")
     title = "Discounted Return"
     if gamma is not None:
         title += f" (gamma={gamma})"
     ax2.set_title(title)
+    ax2.axhline(y=0)
+    ax2.vlines(done_timesteps, ymin=ax2.get_ylim()[0], ymax=ax2.get_ylim()[1],
+               color="red", alpha=0.3, linewidth=1, label="Done")
 
     # Bottom plot: Rewards with rolling average
-    ax3.plot(timesteps, returns, color="black", linewidth=2, label="Discounted Return")
+    # ax3.plot(timesteps, returns, color="black", linewidth=2, label="Discounted Return")
     ax3.plot(timesteps, rewards, color="blue", alpha=0.5, linewidth=1, label="Reward")
     # ax3.plot(rolling_timesteps, rolling_avg, color="blue", linewidth=2, label=f"rolling_avg (window={rolling_window})")
     ax3.set_ylabel("Reward")
     ax3.set_xlabel("Timestep")
     ax3.grid(True, alpha=0.3)
-    ax3.legend(loc="upper right")
-    ax3.set_title("Discounted Return with Rewards")
+    ax3.set_title("Rewards")
+    ax3.axhline(y=0)
+    ax3.vlines(done_timesteps, ymin=ax3.get_ylim()[0], ymax=ax3.get_ylim()[1],
+               color="red", alpha=0.3, linewidth=1, label="Done")
 
     ax1.plot(timesteps, advantages, color="black", linewidth=2, label="Advantage")
-    ax1.plot(timesteps, rewards, color="blue", alpha=0.5, linewidth=1, label="Reward")
     ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="upper right")
+    ax1.axhline(y=0)
+    ax1.set_ylabel("Advantage")
+    ax1.set_xlabel("Timestep")
+    ax1.vlines(done_timesteps, ymin=ax1.get_ylim()[0], ymax=ax1.get_ylim()[1],
+               color="red", alpha=0.3, linewidth=1, label="Done")
 
     fig.suptitle("Rewards and Discounted Return", y=0.995)
 
-    plt.tight_layout()
-
-    return fig
-
-def plot_gae_and_returns(gae: torch.Tensor, returns: torch.Tensor, episode_num=None, gamma=None, lamda=None):
-    gae = gae.detach().cpu().numpy()
-    returns = returns.detach().cpu().numpy()
-
-    if gae.ndim != 1 or returns.ndim != 1:
-        raise ValueError(
-            f"Expected 1D inputs. Got gae shape={gae.shape}, returns shape={returns.shape}"
-        )
-
-    T = min(len(gae), len(returns))
-    if T == 0:
-        raise ValueError("Inputs are empty after conversion.")
-
-    gae = gae[:T]
-    returns = returns[:T]
-    timesteps = np.arange(T)
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-
-    ax1.plot(timesteps, gae, color="blue", linewidth=2, label="GAE")
-    ax1.fill_between(timesteps, gae, alpha=0.25, color="blue")
-    ax1.set_ylabel("GAE")
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="upper right")
-    ax1.set_title("GAE")
-
-    ax2.plot(timesteps, returns, color="black", alpha=0.75, linewidth=2, label="Returns")
-    ax2.fill_between(timesteps, returns, alpha=0.20, color="black")
-    ax2.set_xlabel("Timestep")
-    ax2.set_ylabel("Returns")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="upper right")
-    ax2.set_title("Returns")
-
-    title = "GAE and Returns"
-    if episode_num is not None:
-        title += f" - Episode {episode_num}"
-
-    details = []
-    if gamma is not None:
-        details.append(f"gamma={gamma}")
-    if lamda is not None:
-        details.append(f"lambda={lamda}")
-    if details:
-        title += f" ({', '.join(details)})"
-
-    fig.suptitle(title, y=0.995)
     plt.tight_layout()
 
     return fig

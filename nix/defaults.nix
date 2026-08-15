@@ -2,6 +2,8 @@ helpers: with helpers; {
     network = {
         # 'ppo', 'dqn' or 'apa'
         mode = "ppo";
+        # 'normal' or 'bitwise'
+        expects = "normal";
         init_lr = {
             convLearnRate = e- 5;
             actorLearnRate = e- 5;
@@ -48,10 +50,12 @@ helpers: with helpers; {
         };
     };
     collection = {
-        # either 'runs' or 'experiences'
-        mode = "experiences";
+        # either 'runs', 'games', or 'experiences'
+        mode = "games";
         runs = 100;
         experiences = 2048;
+        # this is games per collection env
+        games = 1;
 
         parallelEnvs = 1;
         maxExperiencesPerTrajectory = 100;
@@ -105,7 +109,7 @@ helpers: with helpers; {
             };
             earlyMove = {
                 enabled = true;
-                diminishFactor = 2.5;
+                diminishFactor = 0.75;
                 # if an action isn't in this it doesn't reward
                 actionsReward = [
                     {name = "LEFT"; reward = 0.5;}

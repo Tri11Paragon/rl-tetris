@@ -105,6 +105,7 @@ class Network:
 	clipping: Clipping
 	dqn: Dqn
 	dropout: float
+	expects: str
 	gamma: float
 	init_lr: Init_lr
 	min_lr: Min_lr
@@ -114,7 +115,7 @@ class Network:
 @dataclass
 class Ppo:
 	entropy: float
-	lamda: int
+	lamda: float
 	minEntropy: float
 
 @dataclass
@@ -147,6 +148,7 @@ class Apa:
 class Collection:
 	erm: Erm
 	experiences: int
+	games: int
 	maxExperiencesPerTrajectory: int
 	mode: str
 	parallelEnvs: int

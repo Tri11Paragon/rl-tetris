@@ -176,14 +176,16 @@ class NetworkRealtimeVisualizer:
                 small=True
             )
 
-    def update(self, state, logits, probs, critic_value, selected_action=None):
+    def update(self, state, logits, probs, critic_value, selected_action=None, expects="normal"):
         self.clear()
 
         state_np = np.asarray(state)
 
-        self.draw_grid_channel(state_np[0], self.rect[0] + 20, 55, "Board channel")
-        self.draw_grid_channel(state_np[1], self.rect[0] + 20, 365, "Piece channel", scale=6)
+        if expects == "normal":
+            self.draw_grid_channel(state_np[0], self.rect[0] + 20, 55, "Board channel")
+            self.draw_grid_channel(state_np[1], self.rect[0] + 20, 365, "Piece channel", scale=6)
 
-        self.draw_action_probs(probs, logits, critic_value, selected_action)
+        if probs is not None and logits is not None and critic_value is not None:
+            self.draw_action_probs(probs, logits, critic_value, selected_action)
 
         self.present()

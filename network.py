@@ -54,6 +54,14 @@ class Parallel(nn.Module):
     def forward(self, x):
         return torch.cat([torch.flatten(branch(x), start_dim=self.dim) for branch in self.branches], dim=self.dim)
 
+class Residual(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, x):
+        return x + self.module(x)
+
 
 class Input(nn.Module):
     def __init__(self, input_key):

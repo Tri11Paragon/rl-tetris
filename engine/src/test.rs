@@ -1,4 +1,5 @@
 use crate::tetris::*;
+use crate::pieces::*;
 #[test]
 pub fn test_something() {
     println!("test");
